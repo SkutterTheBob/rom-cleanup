@@ -155,6 +155,28 @@ def test_find_release_filter_matches_no_match_different_title():
 
 
 # ---------------------------------------------------------------------
+# Unit tests: destination path collision handling
+# ---------------------------------------------------------------------
+
+def test_unique_dest_path_no_collision(tmp_path):
+    dest = rc.unique_dest_path(str(tmp_path), "Game (USA).zip")
+    assert dest == os.path.join(str(tmp_path), "Game (USA).zip")
+
+
+def test_unique_dest_path_avoids_collision(tmp_path):
+    (tmp_path / "Game (USA).zip").write_bytes(b"")
+    dest = rc.unique_dest_path(str(tmp_path), "Game (USA).zip")
+    assert dest == os.path.join(str(tmp_path), "Game (USA) (1).zip")
+
+
+def test_unique_dest_path_increments_past_multiple_collisions(tmp_path):
+    (tmp_path / "Game (USA).zip").write_bytes(b"")
+    (tmp_path / "Game (USA) (1).zip").write_bytes(b"")
+    dest = rc.unique_dest_path(str(tmp_path), "Game (USA).zip")
+    assert dest == os.path.join(str(tmp_path), "Game (USA) (2).zip")
+
+
+# ---------------------------------------------------------------------
 # Integration helpers
 # ---------------------------------------------------------------------
 
