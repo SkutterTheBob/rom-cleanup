@@ -13,3 +13,6 @@ __pycache__/
 Thumbs.db
 *:Zone.Identifier
 *.Zone.Identifier
+
+# Claude Code local settings
+.claude/
