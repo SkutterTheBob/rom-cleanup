@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Added `--flatten-alpha-dirs`: moves everything out of single-letter A-Z
+  (or catch-all `#`/`0-9`/`Misc`/`[BIOS]`/etc) bucket folders directly under
+  `roms_dir` up into `roms_dir` itself, then removes the emptied bucket
+  folders. Respects `--apply` (dry-run preview by default, like everything
+  else). Each bucket entry -- a file, or a whole subfolder such as a
+  multi-disc release's own directory -- is moved as one unit, preserving
+  nested release structure.
+
 ## 1.1.0
 
 - CHD is now preferred over raw disc images (`.bin`/`.cue`/`.iso`/etc) when
