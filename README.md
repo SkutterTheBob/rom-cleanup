@@ -35,6 +35,12 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   to `.duplicates/Redundant-Raw-Disc/` and only the `.chd` is kept.
 - **Supports a filter file** (see below) to protect specific titles/releases
   from ever being touched, or to manually pin which release should win.
+- **Flattens alphabetical bucket folders** (`--flatten-alpha-dirs`) — moves
+  everything out of single-letter `A`-`Z` (or catch-all `#`/`0-9`/`Misc`/
+  `[BIOS]`/etc) subfolders directly under the roms folder back up into it,
+  then removes the emptied bucket folders. Runs as its own standalone
+  operation (dry-run preview by default, `--apply` to actually do it) — it
+  does not also run the normal duplicate scan in the same invocation.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -51,6 +57,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--regions LIST` | Comma-separated region preference, best first (default: `USA,World,Europe,Japan,...`) |
 | `--ext LIST` | Comma-separated extensions to consider (default: common ROM/disc formats) |
 | `--filter-file PATH` | Override the filter file location (default: `<roms_dir>/rom_filters.txt` if present) |
+| `--flatten-alpha-dirs` | Move files out of single-letter `A`-`Z` (or `#`/`0-9`/`Misc`/`[BIOS]`/etc) bucket subfolders directly under `roms_dir`, then remove those folders |
 | `--version` | Print the script version and exit |
 
 ## The filter file: `rom_filters.txt`

@@ -37,7 +37,7 @@ import shutil
 import sys
 from collections import defaultdict
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -96,6 +96,20 @@ RAW_DISC_EXTENSIONS = {
     ".bin", ".cue", ".iso", ".img", ".mds", ".mdf", ".ccd", ".sub",
     ".toc", ".nrg", ".gdi",
 }
+
+# Folder names that some ROM sets use to alphabetically bucket titles into
+# subfolders (e.g. "SNES/A/Aladdin (USA).zip"). --flatten-alpha-dirs moves
+# everything out of folders matching this and removes the folder itself.
+ALPHA_BUCKET_LETTER_RE = re.compile(r"^[a-z]$", re.IGNORECASE)
+ALPHA_BUCKET_CATCHALL_NAMES = {
+    "#", "0-9", "09", "misc", "other", "numbers", "symbols", "non-alpha",
+    "bios", "[bios]",
+}
+
+
+def is_alpha_bucket_dirname(name):
+    return bool(ALPHA_BUCKET_LETTER_RE.match(name)) or name.strip().lower() in ALPHA_BUCKET_CATCHALL_NAMES
+
 
 # If --filter-file isn't given, look for this filename inside roms_dir.
 DEFAULT_FILTER_FILENAME = "rom_filters.txt"
@@ -287,18 +301,101 @@ def load_filter_file(path):
     return result
 
 
-def unique_dest_path(dest_dir, filename):
-    """Avoid collisions when moving files with the same name into duplicates/."""
+def unique_dest_path(dest_dir, filename, also_avoid=None):
+    """Avoid collisions when moving files with the same name into duplicates/.
+
+    also_avoid: optional set of destination paths already claimed by other
+    moves planned in this same run (but not yet performed, so they don't
+    exist on disk yet) -- treated as taken too.
+    """
+    also_avoid = also_avoid or set()
     dest = os.path.join(dest_dir, filename)
-    if not os.path.exists(dest):
+    if not os.path.exists(dest) and dest not in also_avoid:
         return dest
     stem, ext = os.path.splitext(filename)
     i = 1
     while True:
         candidate = os.path.join(dest_dir, "{0} ({1}){2}".format(stem, i, ext))
-        if not os.path.exists(candidate):
+        if not os.path.exists(candidate) and candidate not in also_avoid:
             return candidate
         i += 1
+
+
+def plan_flatten_alpha_dirs(roms_dir, dup_dir):
+    """Find single-letter (or catch-all, e.g. "#"/"0-9"/"Misc"/"[BIOS]") bucket
+    folders directly under roms_dir and build the list of moves needed to
+    flatten their contents up into roms_dir.
+
+    Each entry directly inside a bucket folder -- a file, or a whole
+    subfolder such as a multi-disc release's own directory -- is moved as
+    one unit, so nested release structure is preserved. Only direct
+    children of roms_dir are considered; nested bucket folders deeper in
+    the tree are left alone.
+
+    Returns (moves, bucket_dirs):
+        moves:       [(src_path, dest_path), ...]
+        bucket_dirs: [bucket_dir_path, ...] to remove once emptied
+    """
+    moves = []
+    bucket_dirs = []
+    reserved = set()
+
+    for entry in sorted(os.listdir(roms_dir)):
+        full = os.path.join(roms_dir, entry)
+        if not os.path.isdir(full) or os.path.abspath(full) == dup_dir:
+            continue
+        if not is_alpha_bucket_dirname(entry):
+            continue
+
+        bucket_dirs.append(full)
+        for sub_entry in sorted(os.listdir(full)):
+            src = os.path.join(full, sub_entry)
+            dest = unique_dest_path(roms_dir, sub_entry, also_avoid=reserved)
+            reserved.add(dest)
+            moves.append((src, dest))
+
+    return moves, bucket_dirs
+
+
+def flatten_alpha_dirs(roms_dir, dup_dir, apply):
+    """Print (and, if apply, perform) the moves from plan_flatten_alpha_dirs,
+    then remove the emptied bucket folders. Returns (moved_count, removed_count).
+    """
+    moves, bucket_dirs = plan_flatten_alpha_dirs(roms_dir, dup_dir)
+    if not bucket_dirs:
+        return 0, 0
+
+    print("\nAlphabetical bucket folders found ({0}): {1}".format(
+        len(bucket_dirs), ", ".join(os.path.basename(d) for d in bucket_dirs)))
+    for src, dest in moves:
+        print("  [FLATTEN] {0}  ->  {1}".format(
+            os.path.relpath(src, roms_dir), os.path.relpath(dest, roms_dir)))
+
+    if not apply:
+        print("\nDRY RUN -- would move {0} item(s) out of {1} bucket folder(s) "
+              "and remove them. Re-run with --apply to do it.".format(
+                  len(moves), len(bucket_dirs)))
+        return len(moves), 0
+
+    moved = 0
+    for src, dest in moves:
+        try:
+            shutil.move(src, dest)
+            moved += 1
+        except OSError as e:
+            print("  ERROR moving {0} -> {1}: {2}".format(src, dest, e), file=sys.stderr)
+
+    removed = 0
+    for d in bucket_dirs:
+        try:
+            os.rmdir(d)
+            removed += 1
+        except OSError as e:
+            print("  Warning: could not remove {0}: {1}".format(d, e), file=sys.stderr)
+
+    print("\nFlattened {0}/{1} item(s), removed {2}/{3} bucket folder(s).".format(
+        moved, len(moves), removed, len(bucket_dirs)))
+    return moved, removed
 
 
 def find_release_filter_matches(title_key, release_key, release_entries):
@@ -405,6 +502,13 @@ def main():
                               "exists.".format(DEFAULT_FILTER_FILENAME))
     parser.add_argument("--recursive", action="store_true", default=True,
                          help="Scan subfolders too (default: on)")
+    parser.add_argument("--flatten-alpha-dirs", action="store_true",
+                         help="Move everything out of single-letter A-Z (or catch-all "
+                              "'#'/'0-9'/'Misc'/'[BIOS]'/etc) bucket folders directly under "
+                              "roms_dir up into roms_dir itself, then remove the "
+                              "emptied bucket folders. Respects --apply (dry-run "
+                              "preview by default). Runs standalone -- does not also "
+                              "perform the normal duplicate scan in the same invocation.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -413,6 +517,10 @@ def main():
         sys.exit(1)
 
     dup_dir = os.path.abspath(args.dup_dir) if args.dup_dir else os.path.join(roms_dir, ".duplicates")
+
+    if args.flatten_alpha_dirs:
+        flatten_alpha_dirs(roms_dir, dup_dir, args.apply)
+        return
 
     prior_scan = read_scan_marker(roms_dir)
     if prior_scan:

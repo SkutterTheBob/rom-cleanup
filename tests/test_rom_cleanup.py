@@ -64,6 +64,23 @@ def test_is_proto_beta_tag():
     assert not rc.is_proto_beta_tag("USA")
 
 
+def test_is_alpha_bucket_dirname_single_letter():
+    assert rc.is_alpha_bucket_dirname("A")
+    assert rc.is_alpha_bucket_dirname("z")
+    assert not rc.is_alpha_bucket_dirname("AB")
+    assert not rc.is_alpha_bucket_dirname("SNES")
+
+
+def test_is_alpha_bucket_dirname_catchall_names():
+    assert rc.is_alpha_bucket_dirname("#")
+    assert rc.is_alpha_bucket_dirname("0-9")
+    assert rc.is_alpha_bucket_dirname("Misc")
+    assert rc.is_alpha_bucket_dirname("MISC")
+    assert rc.is_alpha_bucket_dirname("BIOS")
+    assert rc.is_alpha_bucket_dirname("[BIOS]")
+    assert not rc.is_alpha_bucket_dirname("Extras")
+
+
 # ---------------------------------------------------------------------
 # Unit tests: region scoring (regression coverage for the combined-region bug)
 # ---------------------------------------------------------------------
@@ -296,6 +313,88 @@ def test_redundant_raw_disc_cleanup_alongside_chd(tmp_path):
     assert not (game_dir / "Some Game.cue").exists()
     assert (tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Some Game.bin").exists()
     assert (tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Some Game.cue").exists()
+
+
+def test_flatten_alpha_dirs_dry_run_does_not_move(tmp_path):
+    touch(tmp_path / "A" / "Aladdin (USA).zip")
+    touch(tmp_path / "B" / "Bomberman (USA).zip")
+
+    result = run_script(tmp_path, "--flatten-alpha-dirs")
+
+    assert "DRY RUN" in result.stdout
+    assert (tmp_path / "A" / "Aladdin (USA).zip").exists()
+    assert (tmp_path / "B" / "Bomberman (USA).zip").exists()
+    assert not (tmp_path / "Aladdin (USA).zip").exists()
+
+
+def test_flatten_alpha_dirs_apply_moves_and_removes_buckets(tmp_path):
+    touch(tmp_path / "A" / "Aladdin (USA).zip")
+    touch(tmp_path / "B" / "Bomberman (USA).zip")
+    # Not a bucket folder -- should be left alone.
+    touch(tmp_path / "Extras" / "Manual.pdf")
+
+    result = run_script(tmp_path, "--flatten-alpha-dirs", "--apply")
+
+    assert (tmp_path / "Aladdin (USA).zip").exists()
+    assert (tmp_path / "Bomberman (USA).zip").exists()
+    assert not (tmp_path / "A").exists()
+    assert not (tmp_path / "B").exists()
+    assert (tmp_path / "Extras" / "Manual.pdf").exists()
+    # Runs standalone -- must not also perform the normal duplicate scan
+    # in the same invocation.
+    assert "[KEEP]" not in result.stdout
+    assert "[DUP]" not in result.stdout
+
+
+def test_flatten_alpha_dirs_preserves_multi_file_release_subfolder(tmp_path):
+    """A bucket folder containing a whole release subfolder (e.g. a
+    multi-disc game's own directory) should move that subfolder as one
+    unit, not split its contents out individually.
+    """
+    release_dir = tmp_path / "Y" / "Ys Book I & II (USA)"
+    touch(release_dir / "Ys Book I & II (USA).cue")
+    touch(release_dir / "Ys Book I & II (USA) (Track 01).bin")
+
+    run_script(tmp_path, "--flatten-alpha-dirs", "--apply")
+
+    moved_dir = tmp_path / "Ys Book I & II (USA)"
+    assert moved_dir.is_dir()
+    assert (moved_dir / "Ys Book I & II (USA).cue").exists()
+    assert (moved_dir / "Ys Book I & II (USA) (Track 01).bin").exists()
+    assert not (tmp_path / "Y").exists()
+
+
+def test_flatten_alpha_dirs_handles_name_collision(tmp_path):
+    """If two bucket folders happen to contain same-named entries, the
+    second one moved up must not clobber the first.
+    """
+    touch(tmp_path / "A" / "Same Name.zip")
+    touch(tmp_path / "B" / "Same Name.zip")
+
+    run_script(tmp_path, "--flatten-alpha-dirs", "--apply")
+
+    assert (tmp_path / "Same Name.zip").exists()
+    assert (tmp_path / "Same Name (1).zip").exists()
+    assert not (tmp_path / "A").exists()
+    assert not (tmp_path / "B").exists()
+
+
+def test_flatten_alpha_dirs_catchall_bucket(tmp_path):
+    touch(tmp_path / "0-9" / "007 Racing (USA).zip")
+
+    run_script(tmp_path, "--flatten-alpha-dirs", "--apply")
+
+    assert (tmp_path / "007 Racing (USA).zip").exists()
+    assert not (tmp_path / "0-9").exists()
+
+
+def test_flatten_alpha_dirs_bios_bucket(tmp_path):
+    touch(tmp_path / "[BIOS]" / "PSX [BIOS].bin")
+
+    run_script(tmp_path, "--flatten-alpha-dirs", "--apply")
+
+    assert (tmp_path / "PSX [BIOS].bin").exists()
+    assert not (tmp_path / "[BIOS]").exists()
 
 
 def test_blacklist_title_fully_protects(tmp_path):
