@@ -35,9 +35,10 @@ import os
 import re
 import shutil
 import sys
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -398,6 +399,154 @@ def flatten_alpha_dirs(roms_dir, dup_dir, apply):
     return moved, removed
 
 
+# ---- gamelist.xml cleanup ---------------------------------------------
+
+GAMELIST_FILENAME = "gamelist.xml"
+
+# ES-DE/EmulationStation marker used by some libretro cores' auto-generated
+# entries (BIOS setup menus, core config screens, etc.) that aren't actual
+# games -- these get tagged with this string somewhere in their <game>
+# block so they can be filtered out of the game list.
+GAMELIST_NOTGAME_MARKER = "ZZZ(notgame)"
+
+GAMELIST_GAME_BLOCK_RE = re.compile(r"<game\b[^>]*>.*?</game>", re.DOTALL | re.IGNORECASE)
+
+# Hidden backup written alongside each gamelist.xml right before it's
+# overwritten, holding the pre-clean content. Overwritten (not versioned)
+# on every re-run, so it only ever holds the most recent original.
+GAMELIST_BACKUP_FILENAME = ".rom-cleanup-gamelist-xml.bak"
+
+
+def find_gamelists(roms_dir):
+    """Recursively find every gamelist.xml under roms_dir -- covers both
+    pointing this at a single console folder (gamelist.xml directly inside)
+    and at a top-level ROMs folder containing one console subfolder per
+    system, each with its own gamelist.xml.
+    """
+    found = []
+    for root, dirs, files in os.walk(roms_dir):
+        for fname in files:
+            if fname.lower() == GAMELIST_FILENAME:
+                found.append(os.path.join(root, fname))
+    return sorted(found)
+
+
+def _gamelist_entry_label(block):
+    """Best-effort human-readable label for a <game> block, for preview
+    output -- prefers <name>, falls back to <path>, then a generic marker.
+    """
+    m = re.search(r"<name>(.*?)</name>", block, re.DOTALL | re.IGNORECASE)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    m = re.search(r"<path>(.*?)</path>", block, re.DOTALL | re.IGNORECASE)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return "(unnamed entry)"
+
+
+def plan_gamelist_clean(path):
+    """Find <game>...</game> blocks in this gamelist.xml containing the
+    "notgame" marker and build the cleaned file content with those blocks
+    removed.
+
+    Validates the file is well-formed XML both before touching it and
+    after removing the matched blocks, so a malformed or unexpectedly
+    structured gamelist.xml is left untouched rather than risking a
+    corrupted write. Raises xml.etree.ElementTree.ParseError if either
+    check fails.
+
+    Returns (matches, cleaned_text): matches is the list of raw block
+    strings that matched (for preview), empty if none did; cleaned_text is
+    None when there's nothing to remove.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        original = f.read()
+
+    ET.fromstring(original)  # raises ParseError if not well-formed
+
+    matches = []
+
+    def _strip_if_notgame(m):
+        block = m.group(0)
+        if GAMELIST_NOTGAME_MARKER in block:
+            matches.append(block)
+            return ""
+        return block
+
+    cleaned = GAMELIST_GAME_BLOCK_RE.sub(_strip_if_notgame, original)
+    if not matches:
+        return [], None
+
+    # Collapse any run of blank/whitespace-only lines left behind by
+    # removed blocks (e.g. several consecutive removed entries) down to a
+    # single newline, however many were removed in a row.
+    cleaned = re.sub(r"\n(?:[ \t]*\n)+", "\n", cleaned)
+
+    ET.fromstring(cleaned)  # sanity-check the edit didn't break the XML
+    return matches, cleaned
+
+
+def gamelist_clean(roms_dir, apply):
+    """Find every gamelist.xml under roms_dir and remove <game> entries
+    tagged with the ES-DE "notgame" marker, so libretro core setup/config
+    entries don't show up as playable games. Returns (files_changed,
+    entries_removed).
+
+    Before overwriting a gamelist.xml, its pre-clean content is copied to
+    a hidden ".rom-cleanup-gamelist-xml.bak" next to it (overwritten on each re-run, so
+    it only ever holds the most recent original).
+    """
+    gamelists = find_gamelists(roms_dir)
+    if not gamelists:
+        print("No {0} files found under {1}.".format(GAMELIST_FILENAME, roms_dir))
+        return 0, 0
+
+    files_changed = 0
+    total_entries = 0
+
+    for path in gamelists:
+        try:
+            matches, cleaned = plan_gamelist_clean(path)
+        except ET.ParseError as e:
+            print("  Warning: skipping {0} -- not well-formed XML ({1})".format(
+                os.path.relpath(path, roms_dir), e), file=sys.stderr)
+            continue
+
+        if not matches:
+            continue
+
+        print("\n{0}  ({1} \"notgame\" entr{2} found)".format(
+            os.path.relpath(path, roms_dir), len(matches),
+            "y" if len(matches) == 1 else "ies"))
+        for block in matches:
+            print("  [REMOVE] {0}".format(_gamelist_entry_label(block)))
+
+        files_changed += 1
+        total_entries += len(matches)
+
+        if apply:
+            backup_path = os.path.join(os.path.dirname(path), GAMELIST_BACKUP_FILENAME)
+            shutil.copyfile(path, backup_path)
+            print("  [BACKUP] {0}".format(os.path.relpath(backup_path, roms_dir)))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(cleaned)
+
+    if total_entries == 0:
+        print("\nNo \"{0}\" entries found in {1} gamelist.xml file(s).".format(
+            GAMELIST_NOTGAME_MARKER, len(gamelists)))
+        return 0, 0
+
+    if not apply:
+        print("\nDRY RUN -- would remove {0} entr{1} across {2} file(s). "
+              "Re-run with --apply to do it.".format(
+                  total_entries, "y" if total_entries == 1 else "ies", files_changed))
+    else:
+        print("\nRemoved {0} entr{1} across {2} file(s).".format(
+            total_entries, "y" if total_entries == 1 else "ies", files_changed))
+
+    return files_changed, total_entries
+
+
 def find_release_filter_matches(title_key, release_key, release_entries):
     """Return the list of (title_key, tag_set, line) entries from
     release_entries whose tag_set is a subset of this release's own tags
@@ -509,6 +658,18 @@ def main():
                               "emptied bucket folders. Respects --apply (dry-run "
                               "preview by default). Runs standalone -- does not also "
                               "perform the normal duplicate scan in the same invocation.")
+    parser.add_argument("--gamelist-clean", action="store_true",
+                         help="Find every {0} under roms_dir (ES-DE/EmulationStation "
+                              "style -- works whether roms_dir is a single console "
+                              "folder or a top-level ROMs folder with one per system) "
+                              "and remove <game> entries whose block contains "
+                              "\"{1}\" (libretro core setup/config entries), so they "
+                              "don't show up in ES-DE. Backs up each changed file to a "
+                              "hidden {2} next to it first (overwritten on re-run). "
+                              "Respects --apply (dry-run preview by default). Runs "
+                              "standalone.".format(
+                                  GAMELIST_FILENAME, GAMELIST_NOTGAME_MARKER,
+                                  GAMELIST_BACKUP_FILENAME))
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -518,8 +679,21 @@ def main():
 
     dup_dir = os.path.abspath(args.dup_dir) if args.dup_dir else os.path.join(roms_dir, ".duplicates")
 
+    standalone_flags = [name for enabled, name in (
+        (args.flatten_alpha_dirs, "--flatten-alpha-dirs"),
+        (args.gamelist_clean, "--gamelist-clean"),
+    ) if enabled]
+    if len(standalone_flags) > 1:
+        print("Error: {0} can't be combined -- run them one at a time.".format(
+            " and ".join(standalone_flags)), file=sys.stderr)
+        sys.exit(1)
+
     if args.flatten_alpha_dirs:
         flatten_alpha_dirs(roms_dir, dup_dir, args.apply)
+        return
+
+    if args.gamelist_clean:
+        gamelist_clean(roms_dir, args.apply)
         return
 
     prior_scan = read_scan_marker(roms_dir)

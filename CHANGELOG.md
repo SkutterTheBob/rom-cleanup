@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.0
+
+- Added `--gamelist-clean`: recursively finds every `gamelist.xml` under
+  `roms_dir` (ES-DE/EmulationStation style -- works whether `roms_dir` is a
+  single console folder or a top-level ROMs folder with one subfolder per
+  system) and removes any `<game>` entry whose block contains
+  `ZZZ(notgame)`, the marker some libretro cores' auto-generated setup/
+  config entries carry, so they don't show up as playable games in ES-DE.
+  Respects `--apply` (dry-run preview by default) and runs standalone.
+  Validates the file is well-formed XML both before and after editing --
+  a malformed `gamelist.xml` is skipped with a warning rather than risking
+  a corrupted write. Before overwriting a `gamelist.xml`, its pre-clean
+  content is backed up to a hidden `.rom-cleanup-gamelist-xml.bak` right next to it,
+  overwritten on each re-run that actually changes something.
+
 ## 1.2.0
 
 - Added `--flatten-alpha-dirs`: moves everything out of single-letter A-Z

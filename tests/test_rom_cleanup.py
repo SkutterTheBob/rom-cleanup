@@ -82,6 +82,97 @@ def test_is_alpha_bucket_dirname_catchall_names():
 
 
 # ---------------------------------------------------------------------
+# Unit tests: gamelist.xml "notgame" entry removal
+# ---------------------------------------------------------------------
+
+GAMELIST_TEMPLATE = """<?xml version="1.0"?>
+<gameList>
+\t<game>
+\t\t<path>./Aladdin (USA).zip</path>
+\t\t<name>Aladdin</name>
+\t</game>
+\t<game id="151193" source="ScreenScraper.fr">
+\t\t<path>./Pro Action Replay MK2 (Europe) (v1.1) (Unl) [b].zip</path>
+\t\t<name>ZZZ(notgame):#NONGAME</name>
+\t\t<rating>0.8</rating>
+\t\t<releasedate />
+\t\t<developer>Catapult Entertainment</developer>
+\t\t<publisher>Catapult Entertainment</publisher>
+\t\t<hash>70D6B036</hash>
+\t\t<md5>C22E8390832F8E97F3A7472251E46C3E</md5>
+\t</game>
+\t<game>
+\t\t<path>./Bomberman (USA).zip</path>
+\t\t<name>Bomberman</name>
+\t</game>
+</gameList>
+"""
+
+
+def test_plan_gamelist_clean_removes_notgame_entry(tmp_path):
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_text(GAMELIST_TEMPLATE, encoding="utf-8")
+
+    matches, cleaned = rc.plan_gamelist_clean(str(gamelist))
+
+    assert len(matches) == 1
+    assert "ZZZ(notgame)" in matches[0]
+    assert "ZZZ(notgame)" not in cleaned
+    assert "<name>Aladdin</name>" in cleaned
+    assert "<name>Bomberman</name>" in cleaned
+
+
+def test_plan_gamelist_clean_no_matches_returns_none(tmp_path):
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_text(
+        "<?xml version=\"1.0\"?>\n<gameList>\n\t<game>\n\t\t<name>Aladdin</name>\n\t</game>\n</gameList>\n",
+        encoding="utf-8")
+
+    matches, cleaned = rc.plan_gamelist_clean(str(gamelist))
+
+    assert matches == []
+    assert cleaned is None
+
+
+def test_plan_gamelist_clean_result_is_well_formed_xml(tmp_path):
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_text(GAMELIST_TEMPLATE, encoding="utf-8")
+
+    matches, cleaned = rc.plan_gamelist_clean(str(gamelist))
+
+    rc.ET.fromstring(cleaned)  # must not raise
+
+
+def test_plan_gamelist_clean_collapses_consecutive_removed_blocks(tmp_path):
+    """Regression test: removing two ADJACENT <game> blocks (as opposed to
+    one with a real entry on either side) must not leave a stray
+    whitespace-only line behind.
+    """
+    content = (
+        "<?xml version=\"1.0\"?>\n<gameList>\n"
+        "\t<game>\n\t\t<name>Real Game</name>\n\t</game>\n"
+        "\t<game>\n\t\t<name>ZZZ(notgame):#NONGAME</name>\n\t</game>\n"
+        "\t<game>\n\t\t<name>ZZZ(notgame):#NONGAME</name>\n\t</game>\n"
+        "</gameList>\n"
+    )
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_text(content, encoding="utf-8")
+
+    matches, cleaned = rc.plan_gamelist_clean(str(gamelist))
+
+    assert len(matches) == 2
+    assert cleaned == "<?xml version=\"1.0\"?>\n<gameList>\n\t<game>\n\t\t<name>Real Game</name>\n\t</game>\n</gameList>\n"
+
+
+def test_plan_gamelist_clean_rejects_malformed_xml(tmp_path):
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_text("<gameList><game><name>Oops</name></gameList>", encoding="utf-8")
+
+    with pytest.raises(rc.ET.ParseError):
+        rc.plan_gamelist_clean(str(gamelist))
+
+
+# ---------------------------------------------------------------------
 # Unit tests: region scoring (regression coverage for the combined-region bug)
 # ---------------------------------------------------------------------
 
@@ -395,6 +486,108 @@ def test_flatten_alpha_dirs_bios_bucket(tmp_path):
 
     assert (tmp_path / "PSX [BIOS].bin").exists()
     assert not (tmp_path / "[BIOS]").exists()
+
+
+def write_gamelist(path, content=GAMELIST_TEMPLATE):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def test_gamelist_clean_dry_run_does_not_modify_file(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path)
+
+    result = run_script(tmp_path, "--gamelist-clean")
+
+    assert "DRY RUN" in result.stdout
+    assert "ZZZ(notgame)" in gamelist_path.read_text(encoding="utf-8")
+
+
+def test_gamelist_clean_dry_run_does_not_create_backup(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path)
+
+    run_script(tmp_path, "--gamelist-clean")
+
+    assert not (tmp_path / "SNES" / ".rom-cleanup-gamelist-xml.bak").exists()
+
+
+def test_gamelist_clean_apply_removes_notgame_entries(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path)
+
+    result = run_script(tmp_path, "--gamelist-clean", "--apply")
+
+    content = gamelist_path.read_text(encoding="utf-8")
+    assert "ZZZ(notgame)" not in content
+    assert "<name>Aladdin</name>" in content
+    assert "<name>Bomberman</name>" in content
+    assert "Removed 1 entry across 1 file(s)." in result.stdout
+
+
+def test_gamelist_clean_apply_creates_backup_with_original_content(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path)
+
+    run_script(tmp_path, "--gamelist-clean", "--apply")
+
+    backup_path = tmp_path / "SNES" / ".rom-cleanup-gamelist-xml.bak"
+    assert backup_path.exists()
+    assert backup_path.read_text(encoding="utf-8") == GAMELIST_TEMPLATE
+    assert "ZZZ(notgame)" in backup_path.read_text(encoding="utf-8")
+
+
+def test_gamelist_clean_backup_is_overwritten_not_accumulated_on_rerun(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path)
+    backup_path = tmp_path / "SNES" / ".rom-cleanup-gamelist-xml.bak"
+
+    run_script(tmp_path, "--gamelist-clean", "--apply")
+    first_backup_content = backup_path.read_text(encoding="utf-8")
+    assert "ZZZ(notgame)" in first_backup_content
+
+    # Second run: no more "notgame" entries left, so nothing should change
+    # and the existing backup (still holding the real original) must be
+    # left alone -- not clobbered with the already-cleaned content.
+    run_script(tmp_path, "--gamelist-clean", "--apply")
+
+    assert backup_path.read_text(encoding="utf-8") == first_backup_content
+
+
+def test_gamelist_clean_finds_multiple_console_gamelists(tmp_path):
+    write_gamelist(tmp_path / "SNES" / "gamelist.xml")
+    write_gamelist(tmp_path / "Genesis" / "gamelist.xml")
+
+    result = run_script(tmp_path, "--gamelist-clean", "--apply")
+
+    assert "ZZZ(notgame)" not in (tmp_path / "SNES" / "gamelist.xml").read_text(encoding="utf-8")
+    assert "ZZZ(notgame)" not in (tmp_path / "Genesis" / "gamelist.xml").read_text(encoding="utf-8")
+    assert "Removed 2 entries across 2 file(s)." in result.stdout
+
+
+def test_gamelist_clean_no_gamelists_found(tmp_path):
+    touch(tmp_path / "SNES" / "Aladdin (USA).zip")
+
+    result = run_script(tmp_path, "--gamelist-clean")
+
+    assert "No gamelist.xml files found" in result.stdout
+
+
+def test_gamelist_clean_skips_malformed_file_with_warning(tmp_path):
+    gamelist_path = tmp_path / "SNES" / "gamelist.xml"
+    write_gamelist(gamelist_path, "<gameList><game><name>Oops</name></gameList>")
+
+    result = run_script(tmp_path, "--gamelist-clean", "--apply")
+
+    assert "not well-formed XML" in result.stderr
+    assert gamelist_path.read_text(encoding="utf-8") == "<gameList><game><name>Oops</name></gameList>"
+
+
+def test_gamelist_clean_and_flatten_alpha_dirs_cannot_combine(tmp_path):
+    result = run_script(tmp_path, "--gamelist-clean", "--flatten-alpha-dirs")
+
+    assert result.returncode != 0
+    assert "can't be combined" in result.stderr
 
 
 def test_blacklist_title_fully_protects(tmp_path):
