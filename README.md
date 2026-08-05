@@ -41,6 +41,19 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   then removes the emptied bucket folders. Runs as its own standalone
   operation (dry-run preview by default, `--apply` to actually do it) — it
   does not also run the normal duplicate scan in the same invocation.
+- **Cleans "notgame" entries out of ES-DE gamelist.xml files**
+  (`--gamelist-clean`) — recursively finds every `gamelist.xml` under the
+  folder you point it at (works whether that's a single console folder or
+  a top-level ROMs folder with one subfolder per system) and removes any
+  `<game>` entry whose block contains `ZZZ(notgame)` — the marker some
+  libretro cores' auto-generated setup/config entries carry — so they
+  don't show up as playable games in ES-DE. Also runs standalone, respects
+  `--apply`, and validates the XML is well-formed before and after editing
+  so a malformed file is skipped rather than risking a bad write. Before
+  overwriting a `gamelist.xml`, its pre-clean content is backed up to a
+  hidden `.rom-cleanup-gamelist-xml.bak` right next to it (overwritten on each re-run
+  that actually changes something, so it always holds the most recent
+  original).
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -58,6 +71,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--ext LIST` | Comma-separated extensions to consider (default: common ROM/disc formats) |
 | `--filter-file PATH` | Override the filter file location (default: `<roms_dir>/rom_filters.txt` if present) |
 | `--flatten-alpha-dirs` | Move files out of single-letter `A`-`Z` (or `#`/`0-9`/`Misc`/`[BIOS]`/etc) bucket subfolders directly under `roms_dir`, then remove those folders |
+| `--gamelist-clean` | Remove `<game>` entries containing `ZZZ(notgame)` from every `gamelist.xml` found under `roms_dir` (backs each changed file up to `.rom-cleanup-gamelist-xml.bak` first) |
 | `--version` | Print the script version and exit |
 
 ## The filter file: `rom_filters.txt`
