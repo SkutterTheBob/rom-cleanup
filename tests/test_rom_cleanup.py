@@ -207,6 +207,11 @@ def test_has_bad_tag_detects_virtual_console():
     assert rc.has_bad_tag(["USA", "Virtual Console"])
 
 
+def test_has_bad_tag_detects_switch_online():
+    assert rc.has_bad_tag(["Switch Online"])
+    assert rc.has_bad_tag(["USA", "Switch Online"])
+
+
 def test_has_bad_tag_false_for_normal_tags():
     assert not rc.has_bad_tag(["USA"])
     assert not rc.has_bad_tag(["Europe", "Rev 1"])
@@ -222,6 +227,13 @@ def test_score_release_virtual_console_loses_size_tiebreak_to_plain_release():
     plain_score = rc.score_release(["usa"], 1000, priority)
     vc_score = rc.score_release(["usa", "virtual console"], 5000, priority)
     assert plain_score < vc_score
+
+
+def test_score_release_switch_online_loses_size_tiebreak_to_plain_release():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    plain_score = rc.score_release(["usa"], 1000, priority)
+    switch_online_score = rc.score_release(["usa", "switch online"], 5000, priority)
+    assert plain_score < switch_online_score
 
 
 # ---------------------------------------------------------------------
@@ -444,6 +456,30 @@ def test_virtual_console_sole_copy_is_kept(tmp_path):
     run_script(tmp_path, "--apply")
 
     assert (tmp_path / "Only Game (USA) (Virtual Console).zip").exists()
+    assert not (tmp_path / ".duplicates").exists()
+
+
+def test_switch_online_release_moved_to_duplicates_even_when_larger(tmp_path):
+    plain = tmp_path / "Super Game (USA).zip"
+    plain.parent.mkdir(parents=True, exist_ok=True)
+    plain.write_bytes(b"x" * 1000)
+
+    switch_online = tmp_path / "Super Game (USA) (Switch Online).zip"
+    switch_online.write_bytes(b"x" * 5000)
+
+    run_script(tmp_path, "--apply")
+
+    assert plain.exists()
+    assert not switch_online.exists()
+    assert (tmp_path / ".duplicates" / "Super Game (USA) (Switch Online).zip").exists()
+
+
+def test_switch_online_sole_copy_is_kept(tmp_path):
+    touch(tmp_path / "Only Game (USA) (Switch Online).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Only Game (USA) (Switch Online).zip").exists()
     assert not (tmp_path / ".duplicates").exists()
 
 

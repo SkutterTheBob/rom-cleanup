@@ -53,15 +53,15 @@ DEFAULT_REGION_PRIORITY = [
 
 # Tags that mark a file as clearly worse / not a "real" release -- either
 # an unfinished/illegitimate dump, or a modified re-release (e.g. a
-# Virtual Console rip, which often carries injected emulator code and
-# differs from the original cartridge dump) -- scored heavily downward
-# regardless of region. A release tagged like this still wins if it's the
-# ONLY copy of that title (never lose a game entirely just because the
-# one copy on hand happens to be a re-release).
+# Virtual Console or Switch Online rip, which often carries injected
+# emulator code and differs from the original cartridge dump) -- scored
+# heavily downward regardless of region. A release tagged like this still
+# wins if it's the ONLY copy of that title (never lose a game entirely
+# just because the one copy on hand happens to be a re-release).
 BAD_TAGS = [
     "proto", "prototype", "beta", "demo", "sample", "alpha",
     "unl", "unlicensed", "pirate", "bad", "aftermarket", "debug",
-    "virtual console",
+    "virtual console", "switch online",
 ]
 
 # Tags like "Track 01", "Disc 2", "CD1", "Side A" identify one PIECE of a

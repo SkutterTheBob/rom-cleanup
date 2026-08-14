@@ -2,13 +2,13 @@
 
 ## 1.3.1
 
-- Fixed: `(Virtual Console)` re-releases could win over a plain release of
-  the same title purely on the file-size tiebreak (Virtual Console rips
-  are often larger than the original cartridge dump due to injected
-  emulator code). `virtual console` is now treated as a "bad" tag like
-  proto/beta/demo/pirate/etc -- scored below any competing release
-  regardless of size, but still kept if it's the only copy of that title
-  on hand (never lose a game entirely).
+- Fixed: `(Virtual Console)` and `(Switch Online)` re-releases could win
+  over a plain release of the same title purely on the file-size tiebreak
+  (these re-releases are often larger than the original cartridge dump
+  due to injected emulator code). `virtual console` and `switch online`
+  are now treated as "bad" tags like proto/beta/demo/pirate/etc -- scored
+  below any competing release regardless of size, but still kept if it's
+  the only copy of that title on hand (never lose a game entirely).
 
 ## 1.3.0
 
