@@ -21,9 +21,9 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 ## What it does
 
 - **Groups releases by title**, ignoring region/revision/language tags, and
-  picks a keeper using (in priority order): not-proto/beta/bad-dump →
-  CHD over raw bin/cue/iso → best region (configurable) → highest
-  revision → largest file size (tiebreak).
+  picks a keeper using (in priority order): not-proto/beta/bad-dump/
+  Virtual-Console → CHD over raw bin/cue/iso → best region (configurable)
+  → highest revision → largest file size (tiebreak).
 - **Bundles multi-file releases** (`.cue` + all its `.bin` tracks, or a
   multi-disc set) so they're compared as ONE release, not split into
   fake "duplicates" of each other.

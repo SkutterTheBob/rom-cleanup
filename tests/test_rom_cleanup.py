@@ -199,6 +199,32 @@ def test_region_rank_unknown_region_ranks_worst():
 
 
 # ---------------------------------------------------------------------
+# Unit tests: bad-tag detection (deprioritized re-releases/bad dumps)
+# ---------------------------------------------------------------------
+
+def test_has_bad_tag_detects_virtual_console():
+    assert rc.has_bad_tag(["Virtual Console"])
+    assert rc.has_bad_tag(["USA", "Virtual Console"])
+
+
+def test_has_bad_tag_false_for_normal_tags():
+    assert not rc.has_bad_tag(["USA"])
+    assert not rc.has_bad_tag(["Europe", "Rev 1"])
+
+
+def test_score_release_virtual_console_loses_size_tiebreak_to_plain_release():
+    """Regression test for the reported bug: a larger Virtual Console
+    re-release was winning the file-size tiebreak over a smaller plain
+    release of the same title. bad-tag status must be compared before
+    size, so the plain release wins regardless of which file is bigger.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    plain_score = rc.score_release(["usa"], 1000, priority)
+    vc_score = rc.score_release(["usa", "virtual console"], 5000, priority)
+    assert plain_score < vc_score
+
+
+# ---------------------------------------------------------------------
 # Unit tests: disc format scoring (CHD preference)
 # ---------------------------------------------------------------------
 
@@ -385,6 +411,40 @@ def test_chd_preferred_over_region_tagged_raw(tmp_path):
     assert (converted_dir / "Castlevania Chronicles.chd").exists()
     assert (tmp_path / ".duplicates" / "Castlevania Chronicles (USA).bin").exists()
     assert (tmp_path / ".duplicates" / "Castlevania Chronicles (USA).cue").exists()
+
+
+def test_virtual_console_release_moved_to_duplicates_even_when_larger(tmp_path):
+    """Regression test for the reported real-world bug: a "(Virtual
+    Console)" re-release was winning over the plain release of the same
+    title purely because it happened to be a larger file (the file-size
+    tiebreak only kicks in after bad-tag status, region, and revision are
+    equal -- Virtual Console must lose there regardless of size).
+    """
+    plain = tmp_path / "Super Game (USA).zip"
+    plain.parent.mkdir(parents=True, exist_ok=True)
+    plain.write_bytes(b"x" * 1000)
+
+    vc = tmp_path / "Super Game (USA) (Virtual Console).zip"
+    vc.write_bytes(b"x" * 5000)
+
+    run_script(tmp_path, "--apply")
+
+    assert plain.exists()
+    assert not vc.exists()
+    assert (tmp_path / ".duplicates" / "Super Game (USA) (Virtual Console).zip").exists()
+
+
+def test_virtual_console_sole_copy_is_kept(tmp_path):
+    """A Virtual Console release must NOT be discarded just because it's
+    the only copy of that title on hand -- unlike proto/beta builds,
+    which are always routed to duplicates even as the sole copy.
+    """
+    touch(tmp_path / "Only Game (USA) (Virtual Console).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Only Game (USA) (Virtual Console).zip").exists()
+    assert not (tmp_path / ".duplicates").exists()
 
 
 def test_redundant_raw_disc_cleanup_alongside_chd(tmp_path):
