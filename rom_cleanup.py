@@ -34,11 +34,12 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-__version__ = "1.3.1"
+__version__ = "1.4.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -328,6 +329,37 @@ def unique_dest_path(dest_dir, filename, also_avoid=None):
         i += 1
 
 
+def remove_now_empty_dirs(roms_dir, dirs):
+    """For each directory in dirs, remove it if every file that used to be
+    in it has since been moved out (e.g. into .duplicates/) and it's now
+    empty -- e.g. a per-release subfolder (multi-disc set, or a CD image
+    whose .cue/.bin became redundant after --convert-to-chd) left behind
+    once its contents are gone. If removing a directory leaves ITS parent
+    empty too, that gets removed as well, continuing upward -- but this
+    never removes roms_dir itself or anything above it, even if it
+    technically ends up empty of everything but .duplicates/.
+
+    Returns the set of directories actually removed.
+    """
+    roms_dir_abs = os.path.abspath(roms_dir)
+    to_check = {os.path.abspath(d) for d in dirs}
+    removed = set()
+
+    while to_check:
+        d = to_check.pop()
+        if d in removed or d == roms_dir_abs or not d.startswith(roms_dir_abs + os.sep):
+            continue
+        try:
+            if os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+                removed.add(d)
+                to_check.add(os.path.dirname(d))
+        except OSError:
+            pass
+
+    return removed
+
+
 def plan_flatten_alpha_dirs(roms_dir, dup_dir):
     """Find single-letter (or catch-all, e.g. "#"/"0-9"/"Misc"/"[BIOS]") bucket
     folders directly under roms_dir and build the list of moves needed to
@@ -553,6 +585,244 @@ def gamelist_clean(roms_dir, apply):
     return files_changed, total_entries
 
 
+# ---- bin/cue -> CHD conversion -----------------------------------------
+
+CUE_EXTENSION = ".cue"
+CHD_EXTENSION = ".chd"
+
+
+def find_cue_files(roms_dir):
+    """Recursively find every .cue file under roms_dir."""
+    found = []
+    for root, dirs, files in os.walk(roms_dir):
+        for fname in files:
+            if fname.lower().endswith(CUE_EXTENSION):
+                found.append(os.path.join(root, fname))
+    return sorted(found)
+
+
+# Matches a cue sheet's "FILE ..." lines, e.g. FILE "Track01.bin" BINARY
+# or the unquoted form FILE Track01.bin BINARY.
+CUE_FILE_LINE_RE = re.compile(r'^\s*FILE\s+(?:"([^"]+)"|(\S+))', re.IGNORECASE | re.MULTILINE)
+
+
+def parse_cue_file_references(cue_path):
+    """Return the filenames referenced by FILE lines in this .cue, in the
+    order they appear, exactly as written in the cue sheet.
+    """
+    with open(cue_path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    return [m.group(1) if m.group(1) is not None else m.group(2)
+            for m in CUE_FILE_LINE_RE.finditer(text)]
+
+
+def find_cue_case_mismatches(cue_path):
+    """Check that every file referenced by this .cue actually exists (with
+    matching case) next to it. Cue sheets are often authored on
+    case-insensitive filesystems (Windows) and then moved to a
+    case-sensitive one (Linux), where an exact-case reference like
+    FILE "GAME.BIN" silently fails to match an on-disk "game.bin" --
+    chdman's resulting error message is unhelpful (it doesn't clearly
+    name the actual missing file), so this catches it upfront.
+
+    Returns a list of (referenced_name, resolution) tuples for every
+    referenced file that ISN'T present under its exact referenced name.
+    resolution is the actual on-disk filename if exactly one
+    case-insensitive match was found in the same folder (safe to rename
+    into place), or None if there's no match at all, or more than one
+    (ambiguous) -- either way, a human needs to sort it out. An empty
+    list means every referenced file already matches exactly.
+    """
+    cue_dir = os.path.dirname(cue_path)
+    try:
+        on_disk = os.listdir(cue_dir)
+    except OSError:
+        on_disk = []
+    # Exact-match check is a plain (case-sensitive) string comparison
+    # against the directory listing, not os.path.isfile() -- isfile()
+    # follows the *host* filesystem's case-sensitivity, which would make
+    # this silently a no-op when run on a case-insensitive filesystem
+    # (Windows/default macOS) even though the referenced name and the
+    # on-disk name genuinely differ in case.
+    on_disk_exact = set(on_disk)
+    on_disk_by_lower = defaultdict(list)
+    for name in on_disk:
+        on_disk_by_lower[name.lower()].append(name)
+
+    mismatches = []
+    for referenced in parse_cue_file_references(cue_path):
+        if referenced in on_disk_exact:
+            continue
+        candidates = on_disk_by_lower.get(referenced.lower(), [])
+        resolution = candidates[0] if len(candidates) == 1 else None
+        mismatches.append((referenced, resolution))
+    return mismatches
+
+
+def find_chdman(chdman_path=None):
+    """Locate the chdman executable (ships with mame-tools / MAME). Checks
+    an explicit override first (also resolved against PATH, so a bare
+    command name works), falling back to looking up "chdman" on PATH.
+    Returns the resolved path, or None if it can't be found.
+    """
+    if chdman_path:
+        return shutil.which(chdman_path) or (chdman_path if os.path.isfile(chdman_path) else None)
+    return shutil.which("chdman")
+
+
+def plan_chd_conversion(roms_dir):
+    """Find every .cue file under roms_dir and work out, for each, whether
+    it still needs converting and where the resulting .chd should end up:
+    directly alongside the .cue if it's already sitting right in roms_dir,
+    or moved up into roms_dir itself otherwise (same "flatten up to
+    roms_dir" convention as --flatten-alpha-dirs) -- so a CD release that
+    lives in its own subfolder (e.g. for a multi-track bin/cue set) ends
+    up with its .chd sitting flat alongside the rest of the roms.
+
+    A .cue is skipped (treated as already done) if a .chd with the same
+    name already exists at that destination -- makes repeated runs cheap
+    and resumable instead of reconverting everything every time.
+
+    Returns (to_convert, already_done):
+        to_convert:   [(cue_path, working_chd_path, final_chd_path, needs_move), ...]
+                      working_chd_path is where chdman writes the .chd
+                      (next to the .cue); final_chd_path is where it ends
+                      up after the move (same as working_chd_path when no
+                      move is needed).
+        already_done: [cue_path, ...]
+    """
+    to_convert = []
+    already_done = []
+    reserved = set()
+
+    for cue_path in find_cue_files(roms_dir):
+        cue_dir = os.path.dirname(cue_path)
+        chd_name = os.path.splitext(os.path.basename(cue_path))[0] + CHD_EXTENSION
+        needs_move = os.path.abspath(cue_dir) != os.path.abspath(roms_dir)
+        dest_dir = roms_dir if needs_move else cue_dir
+
+        if os.path.exists(os.path.join(dest_dir, chd_name)):
+            already_done.append(cue_path)
+            continue
+
+        working_chd_path = os.path.join(cue_dir, chd_name)
+        final_chd_path = (unique_dest_path(roms_dir, chd_name, also_avoid=reserved)
+                           if needs_move else working_chd_path)
+        reserved.add(final_chd_path)
+        to_convert.append((cue_path, working_chd_path, final_chd_path, needs_move))
+
+    return to_convert, already_done
+
+
+def convert_to_chd(roms_dir, apply, chdman_path=None):
+    """Find every .cue file under roms_dir, convert it to .chd via
+    'chdman createcd', and move the result up into roms_dir if it wasn't
+    already sitting directly there. Returns (converted, skipped, errors).
+
+    Before handing a .cue to chdman, checks every file it references
+    actually exists under that exact name (see find_cue_case_mismatches)
+    -- a common problem on case-sensitive filesystems is a cue sheet
+    written on Windows referencing e.g. "GAME.BIN" when the real file on
+    disk is "game.bin". When there's exactly one case-insensitive match,
+    it's renamed into place to match what the cue expects (only when
+    apply is True); when it's ambiguous or missing entirely, that .cue is
+    reported as blocked and skipped rather than being handed to chdman,
+    whose own error message for this case doesn't clearly name the actual
+    missing file.
+
+    The original .bin/.cue files are left in place -- run the normal
+    duplicate scan with --apply afterward and it will automatically route
+    them into .duplicates/Redundant-Raw-Disc/, since it already detects a
+    .chd alongside raw disc files for the same release.
+    """
+    chdman = find_chdman(chdman_path)
+    if not chdman:
+        print("Error: chdman not found{0}. It ships with mame-tools (Debian/"
+              "Ubuntu: 'sudo apt install mame-tools'); on other platforms, "
+              "install MAME/mame-tools and make sure chdman is on PATH, or "
+              "pass --chdman-path.".format(
+                  " at '{0}'".format(chdman_path) if chdman_path else ""),
+              file=sys.stderr)
+        sys.exit(1)
+
+    to_convert, already_done = plan_chd_conversion(roms_dir)
+    if not to_convert and not already_done:
+        print("No {0} files found under {1}.".format(CUE_EXTENSION, roms_dir))
+        return 0, 0, 0
+
+    for cue_path in already_done:
+        print("[SKIP] {0}  (already converted)".format(os.path.relpath(cue_path, roms_dir)))
+
+    convertible = []
+    blocked = 0
+
+    for cue_path, working_chd_path, final_chd_path, needs_move in to_convert:
+        print("[CONVERT] {0}{1}".format(
+            os.path.relpath(cue_path, roms_dir),
+            "  ->  {0}".format(os.path.relpath(final_chd_path, roms_dir)) if needs_move else ""))
+
+        mismatches = find_cue_case_mismatches(cue_path)
+        cue_dir = os.path.dirname(cue_path)
+        rename_failed = False
+
+        for referenced, actual in mismatches:
+            if actual is None:
+                print("  ERROR: references '{0}', which doesn't exist (even "
+                      "case-insensitively) in its folder.".format(referenced),
+                      file=sys.stderr)
+                continue
+            verb = "Renamed" if apply else "Would rename"
+            print("  [CASE-FIX] {0} '{1}' -> '{2}' (to match what the .cue "
+                  "references)".format(verb, actual, referenced))
+            if apply:
+                try:
+                    os.rename(os.path.join(cue_dir, actual), os.path.join(cue_dir, referenced))
+                except OSError as e:
+                    rename_failed = True
+                    print("    ERROR: rename failed: {0}".format(e), file=sys.stderr)
+
+        if any(actual is None for _, actual in mismatches) or rename_failed:
+            blocked += 1
+            continue
+
+        convertible.append((cue_path, working_chd_path, final_chd_path, needs_move))
+
+    if not apply:
+        print("\nDRY RUN -- would convert {0} .cue file(s) to .chd ({1} "
+              "already converted, skipped{2}). Re-run with --apply to do it.".format(
+                  len(convertible), len(already_done),
+                  "; {0} blocked by unresolved file reference(s)".format(blocked) if blocked else ""))
+        return len(convertible), len(already_done), blocked
+
+    converted = 0
+    errors = blocked
+    for cue_path, working_chd_path, final_chd_path, needs_move in convertible:
+        result = subprocess.run(
+            [chdman, "createcd", "-i", cue_path, "-o", working_chd_path, "-f"],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            errors += 1
+            print("  ERROR converting {0}: {1}".format(
+                os.path.relpath(cue_path, roms_dir),
+                (result.stderr or result.stdout).strip()), file=sys.stderr)
+            continue
+
+        if needs_move:
+            shutil.move(working_chd_path, final_chd_path)
+
+        converted += 1
+
+    print("\nConverted {0}/{1} .cue file(s) to .chd ({2} already converted, "
+          "skipped{3}).".format(
+              converted, len(to_convert), len(already_done),
+              "; {0} error(s)".format(errors) if errors else ""))
+    if converted:
+        print("Run the normal duplicate scan with --apply to route the now-"
+              "redundant .bin/.cue files into .duplicates/Redundant-Raw-Disc/.")
+
+    return converted, len(already_done), errors
+
+
 def find_release_filter_matches(title_key, release_key, release_entries):
     """Return the list of (title_key, tag_set, line) entries from
     release_entries whose tag_set is a subset of this release's own tags
@@ -676,6 +946,21 @@ def main():
                               "standalone.".format(
                                   GAMELIST_FILENAME, GAMELIST_NOTGAME_MARKER,
                                   GAMELIST_BACKUP_FILENAME))
+    parser.add_argument("--convert-to-chd", action="store_true",
+                         help="Find every .cue file under roms_dir, convert it to "
+                              ".chd via 'chdman createcd' (requires chdman, which "
+                              "ships with mame-tools, on PATH -- or pass "
+                              "--chdman-path), and if the .cue wasn't already "
+                              "directly in roms_dir, move the resulting .chd up "
+                              "into roms_dir itself. Skips .cue files already "
+                              "converted. Original .bin/.cue files are left in "
+                              "place -- run the normal scan with --apply "
+                              "afterward to route them into "
+                              ".duplicates/Redundant-Raw-Disc/. Respects --apply "
+                              "(dry-run preview by default). Runs standalone.")
+    parser.add_argument("--chdman-path", default=None, metavar="PATH",
+                         help="Path to the chdman executable, if it's not on "
+                              "PATH (default: look up 'chdman' on PATH)")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -688,6 +973,7 @@ def main():
     standalone_flags = [name for enabled, name in (
         (args.flatten_alpha_dirs, "--flatten-alpha-dirs"),
         (args.gamelist_clean, "--gamelist-clean"),
+        (args.convert_to_chd, "--convert-to-chd"),
     ) if enabled]
     if len(standalone_flags) > 1:
         print("Error: {0} can't be combined -- run them one at a time.".format(
@@ -700,6 +986,10 @@ def main():
 
     if args.gamelist_clean:
         gamelist_clean(roms_dir, args.apply)
+        return
+
+    if args.convert_to_chd:
+        convert_to_chd(roms_dir, args.apply, args.chdman_path)
         return
 
     prior_scan = read_scan_marker(roms_dir)
@@ -1034,8 +1324,10 @@ def main():
         os.makedirs(redundant_dir, exist_ok=True)
     moved = 0
     errors = 0
+    source_dirs = set()
     for src, dest in to_move:
         try:
+            source_dirs.add(os.path.dirname(src))
             shutil.move(src, dest)
             moved += 1
         except OSError as e:
@@ -1043,6 +1335,12 @@ def main():
             print("  ERROR moving {0} -> {1}: {2}".format(src, dest, e), file=sys.stderr)
 
     print("\nMoved {0}/{1} duplicate file(s) into: {2}".format(moved, len(to_move), dup_dir))
+
+    removed_dirs = remove_now_empty_dirs(roms_dir, source_dirs)
+    if removed_dirs:
+        print("\nRemoved {0} now-empty source folder(s):".format(len(removed_dirs)))
+        for d in sorted(removed_dirs):
+            print("  {0}".format(os.path.relpath(d, roms_dir)))
     print_filter_report()
     print_last_scan_footer()
     write_scan_marker(roms_dir)
