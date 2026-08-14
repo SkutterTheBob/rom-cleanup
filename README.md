@@ -10,6 +10,8 @@ Nothing is ever moved without your explicit say-so: every run is a
 **dry-run preview by default**. You only get real file moves with `--apply`.
 
 Requires Python 3.5+ (no third-party dependencies to run the script itself).
+`--convert-to-chd` additionally requires `chdman` (from `mame-tools`) to be
+installed and on `PATH` — see that section below.
 
 ## Quick start
 
@@ -33,6 +35,13 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 - **Cleans up redundant raw disc images** — if a release folder has both a
   `.chd` and leftover `.bin`/`.cue` for the same disc, the raw files move
   to `.duplicates/Redundant-Raw-Disc/` and only the `.chd` is kept.
+- **Removes now-empty source folders** — after `--apply` moves files into
+  `.duplicates/` (dupes, BIOS, proto/beta, or redundant raw disc images),
+  any per-release subfolder they came from that's now completely empty
+  gets removed too (cascading up to its parent if that's emptied as a
+  result). Never touches `roms_dir` itself, and leaves alone any folder
+  that still has something else in it (like the kept `.chd`, or an
+  unrelated file).
 - **Supports a filter file** (see below) to protect specific titles/releases
   from ever being touched, or to manually pin which release should win.
 - **Flattens alphabetical bucket folders** (`--flatten-alpha-dirs`) — moves
@@ -54,6 +63,27 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   hidden `.rom-cleanup-gamelist-xml.bak` right next to it (overwritten on each re-run
   that actually changes something, so it always holds the most recent
   original).
+- **Converts bin/cue CD images to CHD** (`--convert-to-chd`) — finds every
+  `.cue` file under the folder you point it at and converts it to `.chd`
+  via `chdman createcd` (requires `chdman`, which ships with `mame-tools`,
+  on `PATH`, or pass `--chdman-path`). If the `.cue` wasn't already
+  directly in that folder — e.g. it's sitting in its own per-release
+  subfolder alongside its `.bin` tracks — the resulting `.chd` is moved up
+  into the folder itself, alongside the rest of the roms. Skips a `.cue`
+  whose `.chd` already exists, so re-runs are cheap and resumable. Leaves
+  the original `.bin`/`.cue` files in place; run the normal duplicate scan
+  with `--apply` afterward and it'll automatically route them into
+  `.duplicates/Redundant-Raw-Disc/` (it already detects a `.chd` alongside
+  raw disc files for the same release). Also runs standalone and respects
+  `--apply`. Before handing a `.cue` to `chdman`, checks that every file it
+  references actually exists under that exact name — cue sheets are often
+  authored on a case-insensitive filesystem (Windows) and then moved to a
+  case-sensitive one (Linux), where e.g. `FILE "GAME.BIN"` silently fails
+  to match an on-disk `game.bin`. When there's exactly one case-insensitive
+  match, it's renamed into place to match what the `.cue` expects (only
+  with `--apply`); when it's missing entirely or ambiguous, that `.cue` is
+  reported and skipped instead of being handed to `chdman`, whose own
+  error message for this doesn't clearly name the actual missing file.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -72,7 +102,37 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--filter-file PATH` | Override the filter file location (default: `<roms_dir>/rom_filters.txt` if present) |
 | `--flatten-alpha-dirs` | Move files out of single-letter `A`-`Z` (or `#`/`0-9`/`Misc`/`[BIOS]`/etc) bucket subfolders directly under `roms_dir`, then remove those folders |
 | `--gamelist-clean` | Remove `<game>` entries containing `ZZZ(notgame)` from every `gamelist.xml` found under `roms_dir` (backs each changed file up to `.rom-cleanup-gamelist-xml.bak` first) |
+| `--convert-to-chd` | Convert every `.cue` found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
+| `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
 | `--version` | Print the script version and exit |
+
+## Installing chdman (for `--convert-to-chd`)
+
+`chdman` is part of MAME's tools, packaged separately as `mame-tools` on
+most Linux distros:
+
+```bash
+# Debian / Ubuntu
+sudo apt install mame-tools
+
+# Fedora
+sudo dnf install mame-tools
+
+# Arch (AUR)
+yay -S mame-tools
+```
+
+- **macOS**: `brew install mame` (bundles `chdman`).
+- **Windows**: no official package manager entry — download a MAME Windows
+  build from [mamedev.org](https://www.mamedev.org/release.html), which
+  includes `chdman.exe`, and either put it on `PATH` or point
+  `--chdman-path` at it directly.
+
+If `chdman` isn't on `PATH`, pass its location explicitly:
+
+```bash
+python3 rom_cleanup.py /path/to/roms/PSX --convert-to-chd --chdman-path /opt/mame/chdman --apply
+```
 
 ## The filter file: `rom_filters.txt`
 
