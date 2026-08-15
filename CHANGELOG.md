@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.0
+
+- Added `--make-m3u`: finds disc-tagged `.chd` releases (e.g.
+  `Game (USA) (Disc 1).chd`, `(Disc 2).chd`) and, for any title with 2+
+  discs, groups them into a subfolder named after the release directly
+  under `roms_dir`, with an `.m3u` playlist (same name as the folder)
+  listing each disc in order -- the layout ES-DE/RetroArch expect to show
+  and launch a multi-disc game as a single entry. Discs are ordered
+  numerically, not alphabetically (`Disc 10` sorts after `Disc 2`). A
+  lone disc-tagged file with no siblings, or two files claiming the same
+  disc number, are left untouched -- the latter flagged for manual
+  review rather than guessed at. Skips releases already grouped with an
+  up-to-date `.m3u` (content is re-checked, not just existence, so a
+  disc added later is picked up on the next run), and cleans up any
+  source folder left empty by the move. CHD only -- run
+  `--convert-to-chd` first for multi-disc sets still in `.bin`/`.cue`
+  form. Respects `--apply` (dry-run preview by default) and runs
+  standalone.
+
 ## 1.4.1
 
 - Fixed: `(Virtual Console)` and `(Switch Online)` re-releases could win
