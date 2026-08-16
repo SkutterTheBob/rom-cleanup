@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -50,19 +50,6 @@ DEFAULT_REGION_PRIORITY = [
     "usa", "world", "europe", "japan", "asia", "australia", "brazil",
     "canada", "china", "france", "germany", "italy", "korea",
     "netherlands", "spain", "sweden", "taiwan", "uk", "unknown",
-]
-
-# Tags that mark a file as clearly worse / not a "real" release -- either
-# an unfinished/illegitimate dump, or a modified re-release (e.g. a
-# Virtual Console or Switch Online rip, which often carries injected
-# emulator code and differs from the original cartridge dump) -- scored
-# heavily downward regardless of region. A release tagged like this still
-# wins if it's the ONLY copy of that title (never lose a game entirely
-# just because the one copy on hand happens to be a re-release).
-BAD_TAGS = [
-    "proto", "prototype", "beta", "demo", "sample", "alpha",
-    "unl", "unlicensed", "pirate", "bad", "aftermarket", "debug",
-    "virtual console", "switch online",
 ]
 
 # Tags like "Track 01", "Disc 2", "CD1", "Side A" identify one PIECE of a
@@ -76,7 +63,8 @@ PART_TAG_RE_ALT = re.compile(r"^side\s*[a-d]$", re.IGNORECASE)
 
 # Tags that mean "this is a proto/beta build" -- these always get moved to
 # duplicates, even if it's the ONLY copy of that title (unlike other
-# BAD_TAGS, which only matter when choosing between multiple releases).
+# non-standard tags -- see has_non_standard_tag -- which only matter when
+# choosing between multiple releases).
 PROTO_BETA_RE = re.compile(r"^(proto|prototype|beta)\b", re.IGNORECASE)
 
 
@@ -187,9 +175,120 @@ def region_rank(tags, region_priority):
     return best
 
 
-def has_bad_tag(tags):
-    lowered = " ".join(tags).lower()
-    return any(bad in lowered for bad in BAD_TAGS)
+def is_recognized_region_tag(tag, region_priority):
+    """True if every comma/slash-separated part of this tag is a
+    recognized region (e.g. plain "USA", or a combined tag like
+    "USA, Europe") -- mirrors the parsing region_rank() does.
+    """
+    parts = [p.strip().lower() for p in re.split(r"[,/]", tag)]
+    return bool(parts) and all(p in region_priority for p in parts)
+
+
+# ISO 639-1 two-letter codes commonly used in No-Intro/GoodTools-style
+# language tags, e.g. "(En)" or a combined list "(En,Fr,De,Es)". Unlike
+# compilation/collection names (open-ended, can't be fully listed), this
+# is a small, stable, well-known vocabulary -- safe to recognize outright
+# as a legitimate tag rather than treating it as non-standard.
+LANGUAGE_CODES = {
+    "en", "fr", "de", "es", "it", "nl", "pt", "sv", "no", "da", "fi",
+    "zh", "ja", "ko", "pl", "ru", "cs", "hu", "sk", "tr", "ar", "el",
+    "he", "ro", "bg", "hr", "et", "lv", "lt", "sl", "uk",
+}
+
+
+def is_language_tag(tag):
+    """True if every comma/slash-separated part of this tag is a
+    recognized language code (e.g. plain "En", or a combined list like
+    "En,Fr,De,Es").
+    """
+    parts = [p.strip().lower() for p in re.split(r"[,/]", tag)]
+    return bool(parts) and all(p in LANGUAGE_CODES for p in parts)
+
+
+# Informational/technical tags that are legitimate and shouldn't penalize
+# a release, even though they aren't a region/revision/language tag --
+# e.g. "SGB Enhanced" (the game supports Super Game Boy palette/border
+# features when played on an original Game Boy). Unlike compilation/
+# service names (deliberately left unlisted -- see has_non_standard_tag,
+# which catches those generically since the set is open-ended), this is
+# a small, rarely-growing set of known-safe footnotes worth naming
+# explicitly.
+NEUTRAL_TAGS = {
+    "sgb enhanced",
+}
+
+
+def is_neutral_tag(tag):
+    return tag.strip().lower() in NEUTRAL_TAGS
+
+
+def has_non_standard_tag(tags, region_priority):
+    """True if this release carries any tag beyond a plain region,
+    revision, language list, and/or known-neutral informational tag --
+    e.g. a compilation/collection re-release (Virtual Console, Switch
+    Online, Sega Channel, an anniversary/classics collection, ...), a bad
+    dump, a proto/beta leftover, or any other marker. "Game (USA)" is
+    always top priority, followed by "Game (USA) (Rev 1)"; anything else
+    sorts behind an otherwise-equal "clean" release, but a release like
+    this still wins if it's the ONLY copy of that title on hand (never
+    lose a game entirely just because the one copy in hand happens to
+    carry an extra tag).
+    """
+    for tag in tags:
+        if is_recognized_region_tag(tag, region_priority):
+            continue
+        if parse_revision([tag]) != 0:
+            continue
+        if is_language_tag(tag):
+            continue
+        if is_neutral_tag(tag):
+            continue
+        return True
+    return False
+
+
+def language_rank(tags):
+    """Lower is better. 0 if any tag indicates English-language support
+    (e.g. "En" or "En,Fr,De"), else 1. Used by effective_region_rank(),
+    and as a final tertiary tiebreaker in score_release() for the rare
+    case of two releases tied even after that.
+    """
+    for tag in tags:
+        parts = [p.strip().lower() for p in re.split(r"[,/]", tag)]
+        if "en" in parts:
+            return 0
+    return 1
+
+
+def effective_region_rank(tags, region_priority):
+    """Lower is better. Combines region and confirmed-English-language
+    availability into a single ranking, as (tier, region_rank):
+
+      tier 0: the release's region is one of the top 2 configured
+              regions (USA/World by default) -- both long-standing
+              No-Intro/GoodTools conventions for including English
+              content, so nothing else needs to outrank them.
+      tier 1: not a top-2 region, but the release carries an explicit
+              "En" language tag (or a list including it) -- confirms
+              English text is actually present even though the nominal
+              region alone doesn't guarantee it. E.g. a Japan release
+              explicitly tagged "(En)" beats a plain "(Europe)" release,
+              since "Europe" alone doesn't confirm English the way an
+              explicit "(En)" tag does -- but a plain "(World)" release
+              (tier 0) still beats it, since World already implies
+              English by convention without needing an explicit tag.
+      tier 2: everything else, ranked by the normal region_rank() order.
+
+    The region_rank is kept as the second element so releases within the
+    same tier still sort by their underlying region (e.g. two different
+    tier-1 "(En)"-tagged releases, or two tier-2 releases with neither).
+    """
+    rrank = region_rank(tags, region_priority)
+    if rrank < 2:
+        return (0, rrank)
+    if language_rank(tags) == 0:
+        return (1, rrank)
+    return (2, rrank)
 
 
 def disc_format_rank(file_list):
@@ -215,12 +314,21 @@ def score_release(release_tags, total_size, region_priority, fmt_rank=0):
     release (e.g. all tracks of a multi-bin CD image).
     fmt_rank: disc_format_rank() for this release -- CHD beats raw bin/cue.
     """
-    bad = 1 if has_bad_tag(release_tags) else 0
-    rrank = region_rank(release_tags, region_priority)
+    non_standard = 1 if has_non_standard_tag(release_tags, region_priority) else 0
+    eff_tier, eff_rrank = effective_region_rank(release_tags, region_priority)
+    lang_rank = language_rank(release_tags)
     rev = parse_revision(release_tags)
-    # Prefer: not-bad, CHD over raw disc images, better region,
-    # higher revision, larger total size (tiebreak)
-    return (bad, fmt_rank, rrank, -rev, -total_size)
+    # Prefer: CHD over raw disc images, effective region -- a top-2
+    # configured region (USA/World by default), else a confirmed-English
+    # ("En" tag) release, else normal region order (see
+    # effective_region_rank) -- region/revision/language-only tags over
+    # anything else at the SAME effective region tier (e.g. a "(World)
+    # (Collection of SaGa)" release still beats a plain "(Japan)"
+    # release, since World is a better tier and no plain-World release
+    # exists to compete with instead), a final English-tag tiebreak for
+    # the rare case two releases are otherwise still tied, higher
+    # revision, larger total size (final tiebreak)
+    return (fmt_rank, eff_tier, eff_rrank, non_standard, lang_rank, -rev, -total_size)
 
 
 SECTION_RE = re.compile(r"^\[\s*(whitelist|blacklist)\s*\]\s*$", re.IGNORECASE)

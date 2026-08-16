@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.6.0
+
+- Reworked duplicate-scoring priority order to (after CHD-over-raw-disc
+  preference): **effective region** → non-standard-tag status → English-
+  tag tiebreak → revision → file size. Effective region combines region
+  and confirmed-English-language availability into one ranking:
+  - one of the top 2 configured regions (`USA`/`World` by default -- both
+    long-standing No-Intro/GoodTools conventions for including English
+    content) beats everything else outright;
+  - failing that, an explicit `En` language tag (e.g. `(En)` or
+    `(En,Fr,De)`) -- confirming English text is actually present -- beats
+    a same-or-better *nominal* region that doesn't confirm it, e.g.
+    `Game (Japan) (En)` beats a plain `Game (Europe)`, since `Europe`
+    alone doesn't guarantee English the way an explicit tag does; a plain
+    `Game (World)` still beats it, though, since `World` already implies
+    English by convention;
+  - otherwise, normal region order (`World` beats `Japan`) -- this still
+    wins outright over a same-or-better-tier release carrying a
+    non-standard tag, e.g. `Game (World) (Collection of SaGa)` beats a
+    plain `Game (Japan)`, since `World` is simply the better tier and no
+    plain-`World` release exists to compete with instead.
+
+  Only among releases tied on effective region does non-standard-tag
+  status become the deciding factor: instead of a maintained keyword list
+  (`virtual console`, `switch online`, ...), a release now loses to an
+  otherwise-equal one (same effective region) if it carries ANY tag that
+  isn't a recognized region, revision, language, and/or known-neutral
+  informational tag (currently just `SGB Enhanced` -- Super Game Boy
+  palette/border support; unlike compilation names, this small allowlist
+  is deliberately kept, since the set of legitimate technical footnotes is
+  small and rarely grows, unlike compilation/service names). This catches
+  compilation/service re-release tags automatically -- `Sega Channel`,
+  `Disney Classic Games`, `Castlevania Anniversary Collection`, and any
+  future one like them -- with nothing to add by hand, while a
+  legitimately region-tagged release that also happens to list its
+  languages (e.g. `(USA, Europe) (En,Fr,De,Es)`) is correctly treated as a
+  normal release. Removes the old `BAD_TAGS` keyword list and
+  `has_bad_tag()` entirely -- every keyword it covered already fails the
+  new "is this a region/revision/language/neutral tag" check.
+
+  `Game (USA)` is always top priority, followed by `Game (USA) (Rev 1)`;
+  a release still wins if it's the only copy of that title on hand, even
+  with a non-standard tag.
+
 ## 1.5.1
 
 - Changed `--make-m3u`'s layout: the `.m3u` playlist now sits directly in
