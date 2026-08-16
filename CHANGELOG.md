@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.5.1
+
+- Changed `--make-m3u`'s layout: the `.m3u` playlist now sits directly in
+  `roms_dir` (e.g. `Game (USA).m3u`) instead of inside the release's own
+  subfolder, and the disc `.chd` files move into a per-release subfolder
+  nested under a single hidden `.chd/` folder in `roms_dir` (e.g.
+  `.chd/Game (USA)/`) instead of a plain visible one. The previous
+  same-folder layout made ES-DE/RetroArch show two entries for one game
+  -- the folder AND the `.m3u` -- since neither frontend actually
+  collapses a visible folder + `.m3u` pair into one entry; both do ignore
+  dot-prefixed directories when scanning, so hiding the discs' folder is
+  what actually gets the single-entry behavior the flag always intended.
+  Nesting every release's hidden folder under one shared `.chd/` also
+  keeps `roms_dir` itself from filling up with a dot-folder per release.
+  A release still sitting in an older layout is auto-migrated into the
+  current one (including deleting any now-stale old `.m3u`) the next
+  time `--make-m3u --apply` runs.
+
+## 1.5.0
+
+- Added `--make-m3u`: finds disc-tagged `.chd` releases (e.g.
+  `Game (USA) (Disc 1).chd`, `(Disc 2).chd`) and, for any title with 2+
+  discs, groups them into a subfolder named after the release directly
+  under `roms_dir`, with an `.m3u` playlist (same name as the folder)
+  listing each disc in order -- the layout ES-DE/RetroArch expect to show
+  and launch a multi-disc game as a single entry. Discs are ordered
+  numerically, not alphabetically (`Disc 10` sorts after `Disc 2`). A
+  lone disc-tagged file with no siblings, or two files claiming the same
+  disc number, are left untouched -- the latter flagged for manual
+  review rather than guessed at. Skips releases already grouped with an
+  up-to-date `.m3u` (content is re-checked, not just existence, so a
+  disc added later is picked up on the next run), and cleans up any
+  source folder left empty by the move. CHD only -- run
+  `--convert-to-chd` first for multi-disc sets still in `.bin`/`.cue`
+  form. Respects `--apply` (dry-run preview by default) and runs
+  standalone.
+
 ## 1.4.1
 
 - Fixed: `(Virtual Console)` and `(Switch Online)` re-releases could win

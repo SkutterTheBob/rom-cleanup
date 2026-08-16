@@ -287,6 +287,164 @@ def test_plan_chd_conversion_handles_name_collision(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# Unit tests: multi-disc M3U playlist grouping
+# ---------------------------------------------------------------------
+
+def test_parse_disc_number_matches_disc_disk_cd():
+    assert rc.parse_disc_number("Disc 1") == 1
+    assert rc.parse_disc_number("Disc 2") == 2
+    assert rc.parse_disc_number("Disk 3") == 3
+    assert rc.parse_disc_number("CD1") == 1
+    assert rc.parse_disc_number("cd 4") == 4
+
+
+def test_parse_disc_number_none_for_non_disc_tags():
+    assert rc.parse_disc_number("USA") is None
+    assert rc.parse_disc_number("Track 1") is None
+    assert rc.parse_disc_number("Rev 1") is None
+
+
+def test_plan_m3u_grouping_groups_multi_disc_release(tmp_path):
+    touch(tmp_path / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "Game (USA) (Disc 2).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert already_done == []
+    assert ambiguous == []
+    assert len(to_group) == 1
+    hidden_dir_path, m3u_path, discs = to_group[0]
+    assert hidden_dir_path == str(tmp_path / ".chd" / "Game (USA)")
+    assert m3u_path == str(tmp_path / "Game (USA).m3u")
+    assert len(discs) == 2
+    assert [os.path.basename(d[1]) for d in discs] == [
+        "Game (USA) (Disc 1).chd", "Game (USA) (Disc 2).chd"]
+    assert all(needs_move for _, _, needs_move in discs)
+
+
+def test_plan_m3u_grouping_orders_discs_numerically_not_alphabetically(tmp_path):
+    """Regression coverage: "Disc 10" must sort after "Disc 2", not before
+    it as plain string sorting would produce.
+    """
+    touch(tmp_path / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "Game (USA) (Disc 2).chd")
+    touch(tmp_path / "Game (USA) (Disc 10).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert len(to_group) == 1
+    _, _, discs = to_group[0]
+    assert [os.path.basename(d[1]) for d in discs] == [
+        "Game (USA) (Disc 1).chd", "Game (USA) (Disc 2).chd", "Game (USA) (Disc 10).chd"]
+
+
+def test_plan_m3u_grouping_ignores_lone_disc(tmp_path):
+    touch(tmp_path / "Only Disc (USA) (Disc 1).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert to_group == []
+    assert already_done == []
+    assert ambiguous == []
+
+
+def test_plan_m3u_grouping_ignores_non_disc_releases(tmp_path):
+    touch(tmp_path / "Single Disc Game (USA).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert to_group == []
+    assert already_done == []
+
+
+def test_plan_m3u_grouping_flags_ambiguous_duplicate_disc_numbers(tmp_path):
+    touch(tmp_path / "SetA" / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "SetB" / "Game (USA) (Disc 1).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert to_group == []
+    assert len(ambiguous) == 1
+    title, non_disc_tags, chd_paths = ambiguous[0]
+    assert title == "Game"
+    assert non_disc_tags == ["USA"]
+    assert len(chd_paths) == 2
+
+
+def test_plan_m3u_grouping_detects_already_grouped(tmp_path):
+    hidden_dir = tmp_path / ".chd" / "Game (USA)"
+    touch(hidden_dir / "Game (USA) (Disc 1).chd")
+    touch(hidden_dir / "Game (USA) (Disc 2).chd")
+    (tmp_path / "Game (USA).m3u").write_text(
+        ".chd/Game (USA)/Game (USA) (Disc 1).chd\n.chd/Game (USA)/Game (USA) (Disc 2).chd\n",
+        encoding="utf-8")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert to_group == []
+    assert already_done == [str(hidden_dir)]
+
+
+def test_plan_m3u_grouping_regroups_when_m3u_content_is_stale(tmp_path):
+    """If a disc was added since the .m3u was last written, the group is
+    NOT considered already-done -- it needs the .m3u rewritten.
+    """
+    hidden_dir = tmp_path / ".chd" / "Game (USA)"
+    touch(hidden_dir / "Game (USA) (Disc 1).chd")
+    touch(hidden_dir / "Game (USA) (Disc 2).chd")
+    (tmp_path / "Game (USA).m3u").write_text(
+        ".chd/Game (USA)/Game (USA) (Disc 1).chd\n", encoding="utf-8")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert already_done == []
+    assert len(to_group) == 1
+
+
+def test_plan_m3u_grouping_migrates_old_same_folder_layout(tmp_path):
+    """A release grouped under the pre-hidden-folder layout (.chd files and
+    .m3u together in a visible folder) is NOT already-done -- it's picked
+    up for migration into the current ".chd/"-nested layout.
+    """
+    old_folder = tmp_path / "Game (USA)"
+    touch(old_folder / "Game (USA) (Disc 1).chd")
+    touch(old_folder / "Game (USA) (Disc 2).chd")
+    (old_folder / "Game (USA).m3u").write_text(
+        "Game (USA) (Disc 1).chd\nGame (USA) (Disc 2).chd\n", encoding="utf-8")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert already_done == []
+    assert len(to_group) == 1
+    hidden_dir_path, m3u_path, discs = to_group[0]
+    assert hidden_dir_path == str(tmp_path / ".chd" / "Game (USA)")
+    assert m3u_path == str(tmp_path / "Game (USA).m3u")
+    assert all(needs_move for _, _, needs_move in discs)
+
+
+def test_plan_m3u_grouping_migrates_old_per_release_hidden_dir_layout(tmp_path):
+    """A release grouped under the earlier ".Game (USA)/"-per-release-
+    hidden-folder layout (before all releases were nested under a single
+    ".chd/" folder) is NOT already-done -- it's picked up for migration
+    into the current layout.
+    """
+    old_hidden_dir = tmp_path / ".Game (USA)"
+    touch(old_hidden_dir / "Game (USA) (Disc 1).chd")
+    touch(old_hidden_dir / "Game (USA) (Disc 2).chd")
+    (tmp_path / "Game (USA).m3u").write_text(
+        ".Game (USA)/Game (USA) (Disc 1).chd\n.Game (USA)/Game (USA) (Disc 2).chd\n",
+        encoding="utf-8")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert already_done == []
+    assert len(to_group) == 1
+    hidden_dir_path, m3u_path, discs = to_group[0]
+    assert hidden_dir_path == str(tmp_path / ".chd" / "Game (USA)")
+    assert all(needs_move for _, _, needs_move in discs)
+
+
+# ---------------------------------------------------------------------
 # Unit tests: cue sheet FILE-reference case-mismatch detection
 # ---------------------------------------------------------------------
 
@@ -1159,6 +1317,144 @@ def test_convert_to_chd_blocks_unresolvable_reference_without_invoking_chdman(tm
     assert not (console_dir / "game.chd").exists()
     assert "Converted 0/1" in result.stdout
     assert "1 error(s)" in result.stdout
+
+
+def test_make_m3u_dry_run_does_not_move_anything(tmp_path):
+    touch(tmp_path / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "Game (USA) (Disc 2).chd")
+
+    result = run_script(tmp_path, "--make-m3u")
+
+    assert "DRY RUN" in result.stdout
+    assert (tmp_path / "Game (USA) (Disc 1).chd").exists()
+    assert (tmp_path / "Game (USA) (Disc 2).chd").exists()
+    assert not (tmp_path / ".chd").exists()
+    assert not (tmp_path / "Game (USA).m3u").exists()
+
+
+def test_make_m3u_apply_groups_discs_and_writes_playlist(tmp_path):
+    touch(tmp_path / "Final Fantasy VII (USA) (Disc 1).chd")
+    touch(tmp_path / "Final Fantasy VII (USA) (Disc 2).chd")
+    touch(tmp_path / "Final Fantasy VII (USA) (Disc 3).chd")
+
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    hidden_dir = tmp_path / ".chd" / "Final Fantasy VII (USA)"
+    assert (hidden_dir / "Final Fantasy VII (USA) (Disc 1).chd").exists()
+    assert (hidden_dir / "Final Fantasy VII (USA) (Disc 2).chd").exists()
+    assert (hidden_dir / "Final Fantasy VII (USA) (Disc 3).chd").exists()
+    assert not (tmp_path / "Final Fantasy VII (USA) (Disc 1).chd").exists()
+
+    m3u_content = (tmp_path / "Final Fantasy VII (USA).m3u").read_text(encoding="utf-8")
+    assert m3u_content == (
+        ".chd/Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd\n"
+        ".chd/Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd\n"
+        ".chd/Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd\n"
+    )
+    assert "Grouped 1/1" in result.stdout
+
+
+def test_make_m3u_leaves_single_disc_and_lone_disc_releases_alone(tmp_path):
+    touch(tmp_path / "Single Disc Game (USA).chd")
+    touch(tmp_path / "Lone Disc Game (USA) (Disc 1).chd")
+
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert (tmp_path / "Single Disc Game (USA).chd").exists()
+    assert (tmp_path / "Lone Disc Game (USA) (Disc 1).chd").exists()
+    assert "No multi-disc" in result.stdout
+
+
+def test_make_m3u_skips_already_grouped_on_rerun(tmp_path):
+    touch(tmp_path / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "Game (USA) (Disc 2).chd")
+
+    run_script(tmp_path, "--make-m3u", "--apply")
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert "[SKIP]" in result.stdout
+    assert "already grouped" in result.stdout
+
+
+def test_make_m3u_flags_ambiguous_duplicate_disc_numbers_without_touching_files(tmp_path):
+    touch(tmp_path / "SetA" / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "SetB" / "Game (USA) (Disc 1).chd")
+
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert "needs manual review" in result.stderr
+    assert (tmp_path / "SetA" / "Game (USA) (Disc 1).chd").exists()
+    assert (tmp_path / "SetB" / "Game (USA) (Disc 1).chd").exists()
+    assert not (tmp_path / ".chd").exists()
+
+
+def test_make_m3u_removes_now_empty_source_folder(tmp_path):
+    release_dir = tmp_path / "Some Folder"
+    touch(release_dir / "Game (USA) (Disc 1).chd")
+    touch(release_dir / "Game (USA) (Disc 2).chd")
+
+    run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert not release_dir.exists()
+    assert (tmp_path / ".chd" / "Game (USA)" / "Game (USA) (Disc 1).chd").exists()
+
+
+def test_make_m3u_migrates_old_same_folder_layout(tmp_path):
+    """A release grouped under the pre-hidden-folder layout is moved into
+    the current ".chd/"-nested layout on re-run, and the old visible
+    folder (including its now-stale .m3u) is cleaned up.
+    """
+    old_folder = tmp_path / "Game (USA)"
+    touch(old_folder / "Game (USA) (Disc 1).chd")
+    touch(old_folder / "Game (USA) (Disc 2).chd")
+    (old_folder / "Game (USA).m3u").write_text(
+        "Game (USA) (Disc 1).chd\nGame (USA) (Disc 2).chd\n", encoding="utf-8")
+
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert "Grouped 1/1" in result.stdout
+    assert not old_folder.exists()
+    hidden_dir = tmp_path / ".chd" / "Game (USA)"
+    assert (hidden_dir / "Game (USA) (Disc 1).chd").exists()
+    assert (hidden_dir / "Game (USA) (Disc 2).chd").exists()
+    m3u_content = (tmp_path / "Game (USA).m3u").read_text(encoding="utf-8")
+    assert m3u_content == (
+        ".chd/Game (USA)/Game (USA) (Disc 1).chd\n"
+        ".chd/Game (USA)/Game (USA) (Disc 2).chd\n"
+    )
+
+
+def test_make_m3u_migrates_old_per_release_hidden_dir_layout(tmp_path):
+    """A release grouped under the earlier ".Game (USA)/"-per-release-
+    hidden-folder layout is moved into the current single-".chd/"-folder
+    layout on re-run, and the old hidden folder is cleaned up.
+    """
+    old_hidden_dir = tmp_path / ".Game (USA)"
+    touch(old_hidden_dir / "Game (USA) (Disc 1).chd")
+    touch(old_hidden_dir / "Game (USA) (Disc 2).chd")
+    (tmp_path / "Game (USA).m3u").write_text(
+        ".Game (USA)/Game (USA) (Disc 1).chd\n.Game (USA)/Game (USA) (Disc 2).chd\n",
+        encoding="utf-8")
+
+    result = run_script(tmp_path, "--make-m3u", "--apply")
+
+    assert "Grouped 1/1" in result.stdout
+    assert not old_hidden_dir.exists()
+    hidden_dir = tmp_path / ".chd" / "Game (USA)"
+    assert (hidden_dir / "Game (USA) (Disc 1).chd").exists()
+    assert (hidden_dir / "Game (USA) (Disc 2).chd").exists()
+    m3u_content = (tmp_path / "Game (USA).m3u").read_text(encoding="utf-8")
+    assert m3u_content == (
+        ".chd/Game (USA)/Game (USA) (Disc 1).chd\n"
+        ".chd/Game (USA)/Game (USA) (Disc 2).chd\n"
+    )
+
+
+def test_make_m3u_and_convert_to_chd_cannot_combine(tmp_path):
+    result = run_script(tmp_path, "--make-m3u", "--convert-to-chd")
+
+    assert result.returncode != 0
+    assert "can't be combined" in result.stderr
 
 
 def test_blacklist_title_fully_protects(tmp_path):

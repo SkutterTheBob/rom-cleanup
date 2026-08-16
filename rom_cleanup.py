@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-__version__ = "1.4.1"
+__version__ = "1.5.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -823,6 +823,238 @@ def convert_to_chd(roms_dir, apply, chdman_path=None):
     return converted, len(already_done), errors
 
 
+# ---- multi-disc M3U playlist grouping -----------------------------------
+
+M3U_EXTENSION = ".m3u"
+
+# All grouped releases' disc files live under this single hidden folder
+# directly in roms_dir (e.g. roms_dir/.chd/Game (USA)/Game (USA) (Disc
+# 1).chd), one dot-prefixed folder for every release, rather than
+# scattering a dot-prefixed folder per release across roms_dir itself.
+M3U_HIDDEN_DIR_NAME = ".chd"
+
+# Tags that identify one DISC of a multi-disc release, e.g. "(Disc 1)",
+# "(Disc 2)", "(CD1)", "(Disk 3)" -- distinct from PART_TAG_RE, which also
+# matches "Track N" (a piece WITHIN one disc's own cue sheet, already
+# absorbed into that disc's single .chd, not a separate disc of its own).
+DISC_TAG_RE = re.compile(r"^(?:disc|disk|cd)\s*([0-9]+)$", re.IGNORECASE)
+
+
+def parse_disc_number(tag):
+    """Return the disc number if this tag identifies one disc of a
+    multi-disc release (e.g. "Disc 2" -> 2), or None if it doesn't.
+    """
+    m = DISC_TAG_RE.match(tag.strip())
+    return int(m.group(1)) if m else None
+
+
+def find_chd_files(roms_dir):
+    """Recursively find every .chd file under roms_dir."""
+    found = []
+    for root, dirs, files in os.walk(roms_dir):
+        for fname in files:
+            if fname.lower().endswith(CHD_EXTENSION):
+                found.append(os.path.join(root, fname))
+    return sorted(found)
+
+
+def plan_m3u_grouping(roms_dir):
+    """Find every disc-tagged .chd (e.g. "Game (USA) (Disc 1).chd") and
+    group same-title, same-tag sets of 2+ discs so a frontend sees ONE
+    entry for the release: the .m3u playlist sits directly in roms_dir
+    (e.g. "Game (USA).m3u"), while the actual disc .chd files move into a
+    per-release folder nested under a single hidden ".chd/" folder in
+    roms_dir (e.g. ".chd/Game (USA)/") -- ES-DE and RetroArch both ignore
+    dot-prefixed directories when scanning, so only the .m3u shows up, not
+    a second folder entry for the same game.
+
+    A lone disc-tagged file with no siblings sharing its title/tags (only
+    "Disc 1" ever found, no "Disc 2") is left alone -- nothing to group.
+    Two files claiming the SAME disc number for the same title/tags are
+    ambiguous (can't tell which one is really "Disc 1") and are also left
+    alone, flagged for manual review rather than guessing.
+
+    A group already sitting in its target hidden folder with an
+    up-to-date root .m3u is treated as already done -- makes repeated runs
+    cheap and resumable, and self-healing if a disc is added/removed later
+    (the .m3u content is compared, not just its existence). A release
+    still sitting in an older layout (.chd files and .m3u together in a
+    visible "Game (USA)/" folder, or discs in a dot-prefixed per-release
+    folder directly in roms_dir, from before this ".chd/"-nested layout
+    existed) is NOT considered done -- it's picked up in to_group and
+    migrated into the current layout on --apply.
+
+    Returns (to_group, already_done, ambiguous):
+        to_group:     [(hidden_dir_path, m3u_path, discs), ...] where discs
+                      is [(current_path, final_path, needs_move), ...]
+                      sorted by disc number.
+        already_done: [hidden_dir_path, ...]
+        ambiguous:    [(title, non_disc_tags, [chd_path, ...]), ...]
+    """
+    groups = defaultdict(list)  # (title_key, tags_key) -> [(disc_num, chd_path, title, non_disc_tags), ...]
+
+    for chd_path in find_chd_files(roms_dir):
+        stem = os.path.splitext(os.path.basename(chd_path))[0]
+        title, tags = extract_tags(stem)
+
+        disc_num = None
+        disc_tag = None
+        for t in tags:
+            n = parse_disc_number(t)
+            if n is not None:
+                disc_num, disc_tag = n, t
+                break
+        if disc_num is None:
+            continue
+
+        non_disc_tags = [t for t in tags if t is not disc_tag]
+        title_key = normalize_title(title)
+        tags_key = tuple(sorted(t.lower() for t in non_disc_tags))
+        groups[(title_key, tags_key)].append((disc_num, chd_path, title, non_disc_tags))
+
+    to_group = []
+    already_done = []
+    ambiguous = []
+
+    for _, entries in sorted(groups.items()):
+        if len(entries) < 2:
+            continue  # lone disc -- nothing to group
+
+        disc_nums = [e[0] for e in entries]
+        if len(set(disc_nums)) != len(disc_nums):
+            title = entries[0][2]
+            non_disc_tags = entries[0][3]
+            ambiguous.append((title, non_disc_tags, [e[1] for e in entries]))
+            continue
+
+        entries.sort(key=lambda e: e[0])
+        title = entries[0][2]
+        non_disc_tags = entries[0][3]
+        release_name = title + "".join(" ({0})".format(t) for t in non_disc_tags)
+        hidden_dir_path = os.path.join(roms_dir, M3U_HIDDEN_DIR_NAME, release_name)
+        m3u_path = os.path.join(roms_dir, release_name + M3U_EXTENSION)
+
+        reserved = set()
+        discs = []
+        for disc_num, chd_path, _, _ in entries:
+            needs_move = os.path.abspath(os.path.dirname(chd_path)) != os.path.abspath(hidden_dir_path)
+            if needs_move:
+                final_path = unique_dest_path(hidden_dir_path, os.path.basename(chd_path), also_avoid=reserved)
+            else:
+                final_path = chd_path
+            reserved.add(final_path)
+            discs.append((chd_path, final_path, needs_move))
+
+        if not any(needs_move for _, _, needs_move in discs):
+            expected_lines = [
+                M3U_HIDDEN_DIR_NAME + "/" + release_name + "/" + os.path.basename(final_path)
+                for _, final_path, _ in discs]
+            existing_lines = None
+            if os.path.isfile(m3u_path):
+                with open(m3u_path, "r", encoding="utf-8") as f:
+                    existing_lines = [line.strip() for line in f if line.strip()]
+            if existing_lines == expected_lines:
+                already_done.append(hidden_dir_path)
+                continue
+
+        to_group.append((hidden_dir_path, m3u_path, discs))
+
+    return to_group, already_done, ambiguous
+
+
+def make_m3u_playlists(roms_dir, apply):
+    """Print (and, if apply, perform) the grouping plan from
+    plan_m3u_grouping: move each multi-disc release's .chd files into its
+    own subfolder under the single hidden ".chd/" folder in roms_dir, and
+    write an .m3u playlist -- listing them in disc order -- directly in
+    roms_dir. Returns (grouped, already_done).
+
+    Migrating a release out of an older layout also removes that layout's
+    now-stale .m3u (the one that used to sit next to the .chd files, in
+    the original same-folder layout) once its discs have moved out, so it
+    doesn't linger as a duplicate playlist.
+
+    Any source folder left empty by the move is cleaned up (see
+    remove_now_empty_dirs), same as the normal scan's --apply step.
+    """
+    to_group, already_done, ambiguous = plan_m3u_grouping(roms_dir)
+
+    if not to_group and not already_done and not ambiguous:
+        print("No multi-disc {0} releases found under {1}.".format(CHD_EXTENSION, roms_dir))
+        return 0, 0
+
+    def release_name_of(hidden_dir_path):
+        return os.path.basename(hidden_dir_path)
+
+    for hidden_dir_path in already_done:
+        print("[SKIP] {0}  (already grouped)".format(release_name_of(hidden_dir_path)))
+
+    for title, non_disc_tags, chd_paths in ambiguous:
+        label = title + "".join(" ({0})".format(t) for t in non_disc_tags)
+        print("\n  Warning: {0!r} has multiple .chd files claiming the same "
+              "disc number -- skipping, needs manual review:".format(label),
+              file=sys.stderr)
+        for p in sorted(chd_paths):
+            print("    {0}".format(os.path.relpath(p, roms_dir)), file=sys.stderr)
+
+    for hidden_dir_path, m3u_path, discs in to_group:
+        print("\n{0}".format(release_name_of(hidden_dir_path)))
+        for current_path, final_path, needs_move in discs:
+            if needs_move:
+                print("  [MOVE] {0}  ->  {1}".format(
+                    os.path.relpath(current_path, roms_dir),
+                    os.path.relpath(final_path, roms_dir)))
+            else:
+                print("  {0}".format(os.path.relpath(final_path, roms_dir)))
+        print("  [M3U] {0}".format(os.path.relpath(m3u_path, roms_dir)))
+
+    if not apply:
+        print("\nDRY RUN -- would group {0} multi-disc release(s) ({1} "
+              "already grouped, skipped{2}). Re-run with --apply to do it.".format(
+                  len(to_group), len(already_done),
+                  "; {0} ambiguous, needs manual review".format(len(ambiguous)) if ambiguous else ""))
+        return len(to_group), len(already_done)
+
+    grouped = 0
+    errors = 0
+    source_dirs = set()
+    for hidden_dir_path, m3u_path, discs in to_group:
+        release_name = release_name_of(hidden_dir_path)
+        relative_dir = M3U_HIDDEN_DIR_NAME + "/" + release_name
+        stale_m3u_name = release_name + M3U_EXTENSION
+        try:
+            os.makedirs(hidden_dir_path, exist_ok=True)
+            for current_path, final_path, needs_move in discs:
+                if needs_move:
+                    source_dir = os.path.dirname(current_path)
+                    source_dirs.add(source_dir)
+                    shutil.move(current_path, final_path)
+                    stale_m3u = os.path.join(source_dir, stale_m3u_name)
+                    if (os.path.abspath(stale_m3u) != os.path.abspath(m3u_path)
+                            and os.path.isfile(stale_m3u)):
+                        os.remove(stale_m3u)
+            with open(m3u_path, "w", encoding="utf-8", newline="\n") as f:
+                for _, final_path, _ in discs:
+                    f.write(relative_dir + "/" + os.path.basename(final_path) + "\n")
+            grouped += 1
+        except OSError as e:
+            errors += 1
+            print("  ERROR grouping {0}: {1}".format(release_name, e), file=sys.stderr)
+
+    print("\nGrouped {0}/{1} multi-disc release(s) ({2} already grouped, "
+          "skipped{3}).".format(
+              grouped, len(to_group), len(already_done),
+              "; {0} error(s)".format(errors) if errors else ""))
+
+    removed_dirs = remove_now_empty_dirs(roms_dir, source_dirs)
+    if removed_dirs:
+        print("\nRemoved {0} now-empty source folder(s):".format(len(removed_dirs)))
+        for d in sorted(removed_dirs):
+            print("  {0}".format(os.path.relpath(d, roms_dir)))
+
+    return grouped, len(already_done)
+
+
 def find_release_filter_matches(title_key, release_key, release_entries):
     """Return the list of (title_key, tag_set, line) entries from
     release_entries whose tag_set is a subset of this release's own tags
@@ -961,6 +1193,23 @@ def main():
     parser.add_argument("--chdman-path", default=None, metavar="PATH",
                          help="Path to the chdman executable, if it's not on "
                               "PATH (default: look up 'chdman' on PATH)")
+    parser.add_argument("--make-m3u", action="store_true",
+                         help="Group multi-disc .chd releases (e.g. \"Game (USA) "
+                              "(Disc 1).chd\", \"(Disc 2).chd\") behind a single "
+                              "playlist entry: the .m3u is written directly in "
+                              "roms_dir (e.g. \"Game (USA).m3u\") while the disc "
+                              ".chd files move into their own subfolder under a "
+                              "single hidden \".chd/\" folder in roms_dir (e.g. "
+                              "\".chd/Game (USA)/\"), which ES-DE and RetroArch "
+                              "both ignore when scanning -- so only the .m3u shows "
+                              "up, not a second folder entry for the same game. "
+                              "Skips releases already grouped with an up-to-date "
+                              ".m3u, and migrates any release still in an older "
+                              "layout into this one. A lone disc-tagged file with "
+                              "no siblings, or two files claiming the same disc "
+                              "number, are left alone. "
+                              "Respects --apply (dry-run preview by default). "
+                              "Runs standalone.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -974,6 +1223,7 @@ def main():
         (args.flatten_alpha_dirs, "--flatten-alpha-dirs"),
         (args.gamelist_clean, "--gamelist-clean"),
         (args.convert_to_chd, "--convert-to-chd"),
+        (args.make_m3u, "--make-m3u"),
     ) if enabled]
     if len(standalone_flags) > 1:
         print("Error: {0} can't be combined -- run them one at a time.".format(
@@ -990,6 +1240,10 @@ def main():
 
     if args.convert_to_chd:
         convert_to_chd(roms_dir, args.apply, args.chdman_path)
+        return
+
+    if args.make_m3u:
+        make_m3u_playlists(roms_dir, args.apply)
         return
 
     prior_scan = read_scan_marker(roms_dir)
