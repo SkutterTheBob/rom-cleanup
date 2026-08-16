@@ -569,41 +569,216 @@ def test_region_rank_unknown_region_ranks_worst():
 
 
 # ---------------------------------------------------------------------
-# Unit tests: bad-tag detection (deprioritized re-releases/bad dumps)
+# Unit tests: non-standard-tag detection (deprioritized re-releases,
+# compilations, bad dumps, and anything else beyond region/revision)
 # ---------------------------------------------------------------------
 
-def test_has_bad_tag_detects_virtual_console():
-    assert rc.has_bad_tag(["Virtual Console"])
-    assert rc.has_bad_tag(["USA", "Virtual Console"])
+def test_is_recognized_region_tag_plain_and_combined():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.is_recognized_region_tag("USA", priority)
+    assert rc.is_recognized_region_tag("USA, Korea", priority)
+    assert rc.is_recognized_region_tag("USA/Europe", priority)
+    assert not rc.is_recognized_region_tag("Atlantis", priority)
+    assert not rc.is_recognized_region_tag("Rev 1", priority)
 
 
-def test_has_bad_tag_detects_switch_online():
-    assert rc.has_bad_tag(["Switch Online"])
-    assert rc.has_bad_tag(["USA", "Switch Online"])
+def test_has_non_standard_tag_false_for_region_and_revision_only():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert not rc.has_non_standard_tag(["USA"], priority)
+    assert not rc.has_non_standard_tag(["Europe", "Rev 1"], priority)
+    assert not rc.has_non_standard_tag(["USA, Korea"], priority)
+    assert not rc.has_non_standard_tag(["World", "v1.1"], priority)
 
 
-def test_has_bad_tag_false_for_normal_tags():
-    assert not rc.has_bad_tag(["USA"])
-    assert not rc.has_bad_tag(["Europe", "Rev 1"])
+def test_has_non_standard_tag_true_for_known_re_release_tags():
+    """Virtual Console / Switch Online no longer need a hardcoded list --
+    they're caught the same way any other non-region/revision tag is.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.has_non_standard_tag(["USA", "Virtual Console"], priority)
+    assert rc.has_non_standard_tag(["USA", "Switch Online"], priority)
 
 
-def test_score_release_virtual_console_loses_size_tiebreak_to_plain_release():
-    """Regression test for the reported bug: a larger Virtual Console
-    re-release was winning the file-size tiebreak over a smaller plain
-    release of the same title. bad-tag status must be compared before
-    size, so the plain release wins regardless of which file is bigger.
+def test_has_non_standard_tag_true_for_arbitrary_compilation_names():
+    """The whole point of the general rule: catches ANY compilation/
+    collection re-release tag, not just ones on a maintained list.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.has_non_standard_tag(["USA", "Sega Channel"], priority)
+    assert rc.has_non_standard_tag(["USA", "Disney Classic Games"], priority)
+    assert rc.has_non_standard_tag(["USA", "Castlevania Anniversary Collection"], priority)
+
+
+def test_score_release_non_standard_tag_loses_size_tiebreak_to_plain_release():
+    """Regression test for the reported bug pattern: a larger re-release
+    was winning the file-size tiebreak over a smaller plain release of
+    the same title. non-standard-tag status must be compared before
+    size, so the plain release wins regardless of which file is bigger --
+    and this now holds for ANY extra tag, not just a maintained list.
     """
     priority = rc.DEFAULT_REGION_PRIORITY
     plain_score = rc.score_release(["usa"], 1000, priority)
-    vc_score = rc.score_release(["usa", "virtual console"], 5000, priority)
-    assert plain_score < vc_score
+    for extra_tag in ["virtual console", "switch online", "sega channel",
+                       "disney classic games", "castlevania anniversary collection"]:
+        other_score = rc.score_release(["usa", extra_tag], 5000, priority)
+        assert plain_score < other_score, extra_tag
 
 
-def test_score_release_switch_online_loses_size_tiebreak_to_plain_release():
+def test_score_release_better_region_beats_non_standard_tag_at_worse_region():
+    """Regression test for the reported SA-GA 3 bug: region must be
+    compared BEFORE non-standard-tag status. A "(World) (Collection of
+    SaGa)" release should beat a plain "(Japan)" release, since World is
+    simply the better region -- the compilation tag only matters as a
+    tiebreaker when regions are otherwise equal (see the Virtual Console/
+    Switch Online tests above, where both releases share the same
+    region).
+    """
     priority = rc.DEFAULT_REGION_PRIORITY
-    plain_score = rc.score_release(["usa"], 1000, priority)
-    switch_online_score = rc.score_release(["usa", "switch online"], 5000, priority)
-    assert plain_score < switch_online_score
+    japan_only = rc.score_release(["japan"], 1000, priority)
+    world_collection = rc.score_release(["world", "ja", "collection of saga"], 1000, priority)
+    assert world_collection < japan_only
+
+
+# ---------------------------------------------------------------------
+# Unit tests: effective_region_rank (region + confirmed-English-language
+# combined ranking; regression coverage for the reported Mickey Mouse case)
+# ---------------------------------------------------------------------
+
+def test_effective_region_rank_top_two_regions_are_tier_zero():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.effective_region_rank(["USA"], priority)[0] == 0
+    assert rc.effective_region_rank(["World"], priority)[0] == 0
+
+
+def test_effective_region_rank_explicit_english_tag_is_tier_one():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.effective_region_rank(["Japan", "En"], priority)[0] == 1
+    assert rc.effective_region_rank(["Europe", "En,Fr,De"], priority)[0] == 1
+
+
+def test_effective_region_rank_no_english_no_top_region_is_tier_two():
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert rc.effective_region_rank(["Japan"], priority)[0] == 2
+    assert rc.effective_region_rank(["Europe"], priority)[0] == 2
+
+
+def test_score_release_english_tagged_japan_beats_plain_europe():
+    """Regression test for the reported Mickey Mouse bug: an explicit
+    "(En)" tag confirms English text is present, which matters more than
+    a plain region tag that doesn't confirm it -- "(Europe)" alone
+    doesn't guarantee English the way "(Japan) (En)" does.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    japan_en_score = rc.score_release(["japan", "en"], 1000, priority)
+    europe_score = rc.score_release(["europe"], 1000, priority)
+    assert japan_en_score < europe_score
+
+
+def test_score_release_world_beats_english_tagged_japan():
+    """Companion to the Mickey Mouse fix: a plain "(World)" release still
+    beats an "(En)"-tagged Japan release, since World already implies
+    English by convention without needing an explicit tag -- only USA
+    and World are untouchable top tier, not merely-en-tagged releases.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    world_score = rc.score_release(["world"], 1000, priority)
+    japan_en_score = rc.score_release(["japan", "en"], 1000, priority)
+    assert world_score < japan_en_score
+
+
+# ---------------------------------------------------------------------
+# Unit tests: language-tag recognition (regression coverage for the
+# reported VS Battler / Turok cases)
+# ---------------------------------------------------------------------
+
+def test_is_language_tag_plain_and_combined():
+    assert rc.is_language_tag("En")
+    assert rc.is_language_tag("en")
+    assert rc.is_language_tag("En,Fr,De,Es")
+    assert rc.is_language_tag("En/Fr")
+    assert not rc.is_language_tag("USA")
+    assert not rc.is_language_tag("En,USA")  # mixed -- not a pure language list
+
+
+def test_has_non_standard_tag_false_for_language_tags():
+    """Regression test for the reported Turok bug: a legitimate release
+    carrying a real region tag PLUS a language list (e.g. "USA, Europe"
+    + "En,Fr,De,Es") must not be treated as non-standard just because of
+    the language list -- it was losing to a Japan-only release that had
+    no such tag at all.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert not rc.has_non_standard_tag(["USA, Europe", "En,Fr,De,Es"], priority)
+    assert not rc.has_non_standard_tag(["Japan", "En"], priority)
+
+
+def test_is_neutral_tag_sgb_enhanced():
+    assert rc.is_neutral_tag("SGB Enhanced")
+    assert rc.is_neutral_tag("sgb enhanced")
+    assert not rc.is_neutral_tag("Sega Channel")
+
+
+def test_has_non_standard_tag_false_for_neutral_tags():
+    """Regression test for the reported Smurfs bug: "SGB Enhanced" is a
+    legitimate hardware-capability footnote, not a compilation/service
+    re-release indicator, and must not penalize an otherwise
+    better-regioned release.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    assert not rc.has_non_standard_tag(
+        ["USA, Europe", "En,Fr,De", "Rev 1", "SGB Enhanced"], priority)
+
+
+def test_score_release_sgb_enhanced_does_not_lose_to_lesser_region():
+    """Regression test for the reported Smurfs bug: a (USA, Europe)
+    release with (Rev 1) (SGB Enhanced) must still beat a plain (Europe)
+    release -- the neutral tag must not drag it down to "non-standard".
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    usa_europe_score = rc.score_release(
+        ["usa, europe", "en,fr,de", "rev 1", "sgb enhanced"], 1000, priority)
+    europe_only_score = rc.score_release(["europe", "en,fr,de,es"], 5000, priority)
+    assert usa_europe_score < europe_only_score
+
+
+def test_language_rank_prefers_english():
+    assert rc.language_rank(["Japan", "En"]) == 0
+    assert rc.language_rank(["USA, Europe", "En,Fr,De,Es"]) == 0
+    assert rc.language_rank(["Japan"]) == 1
+    assert rc.language_rank(["Japan", "Fr"]) == 1
+
+
+def test_score_release_english_tagged_beats_untranslated_same_region():
+    """Regression test for the reported VS Battler bug: a Japan release
+    with an "(En)" fan translation should beat the untranslated Japan
+    release when there's no proper USA/English release available.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    plain_japan = rc.score_release(["japan"], 1000, priority)
+    japan_en = rc.score_release(["japan", "en"], 1000, priority)
+    assert japan_en < plain_japan
+
+
+def test_score_release_usa_still_beats_english_tagged_japan():
+    """Regression test for the reported requirement: "USA still takes
+    priority" over a Japan release with an "(En)" tag.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    usa_score = rc.score_release(["usa"], 1000, priority)
+    japan_en_score = rc.score_release(["japan", "en"], 1000, priority)
+    assert usa_score < japan_en_score
+
+
+def test_score_release_multi_region_with_languages_beats_single_region_no_language():
+    """Regression test for the reported Turok bug: a properly-regioned
+    multi-language release (USA, Europe + En,Fr,De,Es) must beat a
+    Japan-only release with no language indication at all, regardless of
+    file size.
+    """
+    priority = rc.DEFAULT_REGION_PRIORITY
+    japan_score = rc.score_release(["japan"], 5000, priority)
+    usa_europe_score = rc.score_release(["usa, europe", "en,fr,de,es"], 1000, priority)
+    assert usa_europe_score < japan_score
 
 
 # ---------------------------------------------------------------------
@@ -909,6 +1084,132 @@ def test_switch_online_sole_copy_is_kept(tmp_path):
 
     assert (tmp_path / "Only Game (USA) (Switch Online).zip").exists()
     assert not (tmp_path / ".duplicates").exists()
+
+
+def test_arbitrary_compilation_tag_loses_to_plain_release_even_when_larger(tmp_path):
+    """The general non-standard-tag rule catches ANY compilation/service
+    re-release tag, not just ones on a maintained list -- e.g. reported
+    real-world cases like Sega Channel and anniversary/classics
+    collections, which this repo has no prior knowledge of by name.
+    """
+    plain = tmp_path / "Super Game (USA).zip"
+    plain.parent.mkdir(parents=True, exist_ok=True)
+    plain.write_bytes(b"x" * 1000)
+
+    compilation = tmp_path / "Super Game (USA) (Castlevania Anniversary Collection).zip"
+    compilation.write_bytes(b"x" * 5000)
+
+    run_script(tmp_path, "--apply")
+
+    assert plain.exists()
+    assert not compilation.exists()
+    assert (tmp_path / ".duplicates" / "Super Game (USA) (Castlevania Anniversary Collection).zip").exists()
+
+
+def test_arbitrary_compilation_tag_sole_copy_is_kept(tmp_path):
+    touch(tmp_path / "Only Game (USA) (Sega Channel).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Only Game (USA) (Sega Channel).zip").exists()
+    assert not (tmp_path / ".duplicates").exists()
+
+
+def test_english_tagged_japan_release_beats_untranslated_japan(tmp_path):
+    """End-to-end regression test for the reported VS Battler case."""
+    touch(tmp_path / "VS Battler (Japan).zip")
+    touch(tmp_path / "VS Battler (Japan) (En).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "VS Battler (Japan) (En).zip").exists()
+    assert (tmp_path / ".duplicates" / "VS Battler (Japan).zip").exists()
+
+
+def test_usa_release_still_beats_english_tagged_japan_release(tmp_path):
+    """End-to-end regression test for "USA still takes priority"."""
+    touch(tmp_path / "VS Battler (USA).zip")
+    touch(tmp_path / "VS Battler (Japan) (En).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "VS Battler (USA).zip").exists()
+    assert (tmp_path / ".duplicates" / "VS Battler (Japan) (En).zip").exists()
+
+
+def test_multi_region_language_list_release_beats_single_region_release(tmp_path):
+    """End-to-end regression test for the reported Turok case: a
+    properly-regioned (USA, Europe) release with a language list must
+    beat a Japan-only release, not lose to it.
+    """
+    touch(tmp_path / "Turok - Battle of the Bionosaurs (Japan).zip")
+    touch(tmp_path / "Turok - Battle of the Bionosaurs (USA, Europe) (En,Fr,De,Es).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Turok - Battle of the Bionosaurs (USA, Europe) (En,Fr,De,Es).zip").exists()
+    assert (tmp_path / ".duplicates" / "Turok - Battle of the Bionosaurs (Japan).zip").exists()
+
+
+def test_sgb_enhanced_tag_does_not_block_better_region_release(tmp_path):
+    """End-to-end regression test for the reported Smurfs case: "SGB
+    Enhanced" is a legitimate hardware-capability footnote, not a
+    compilation/service tag, and must not cause a (USA, Europe) release
+    to lose to a plain (Europe) release.
+    """
+    touch(tmp_path / "Smurfs, The (Europe) (En,Fr,De,Es).zip")
+    touch(tmp_path / "Smurfs, The (USA, Europe) (En,Fr,De) (Rev 1) (SGB Enhanced).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Smurfs, The (USA, Europe) (En,Fr,De) (Rev 1) (SGB Enhanced).zip").exists()
+    assert (tmp_path / ".duplicates" / "Smurfs, The (Europe) (En,Fr,De,Es).zip").exists()
+
+
+def test_better_region_compilation_release_beats_plain_worse_region_release(tmp_path):
+    """End-to-end regression test for the reported SA-GA 3 case: a
+    "(World) (Collection of SaGa)" release must beat a plain "(Japan)"
+    release, since World is simply the better region and no plain-World
+    release exists to compete with instead.
+    """
+    touch(tmp_path / "Sa-Ga 3 - Jikuu no Hasha (Japan).zip")
+    touch(tmp_path / "Sa-Ga 3 - Jikuu no Hasha (World) (Ja) (Collection of SaGa).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Sa-Ga 3 - Jikuu no Hasha (World) (Ja) (Collection of SaGa).zip").exists()
+    assert (tmp_path / ".duplicates" / "Sa-Ga 3 - Jikuu no Hasha (Japan).zip").exists()
+
+
+def test_same_region_compilation_tag_still_loses_to_plain_release(tmp_path):
+    """Companion test to the SA-GA 3 fix: when regions ARE equal, the
+    compilation tag must still lose (region taking priority over the tag
+    only matters when regions actually differ).
+    """
+    touch(tmp_path / "Super Game (USA).zip")
+    touch(tmp_path / "Super Game (USA) (Collection of Something).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Super Game (USA).zip").exists()
+    assert (tmp_path / ".duplicates" / "Super Game (USA) (Collection of Something).zip").exists()
+
+
+def test_english_tagged_japan_beats_plain_europe_release(tmp_path):
+    """End-to-end regression test for the reported Mickey Mouse case: an
+    explicit "(En)" tag confirms English text, which beats a plain
+    "(Europe)" release that doesn't confirm it -- while a plain "(Japan)"
+    release with no language tag at all still loses to both.
+    """
+    touch(tmp_path / "Mickey Mouse (Europe).zip")
+    touch(tmp_path / "Mickey Mouse (Japan) (En).zip")
+    touch(tmp_path / "Mickey Mouse (Japan).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert (tmp_path / "Mickey Mouse (Japan) (En).zip").exists()
+    assert (tmp_path / ".duplicates" / "Mickey Mouse (Europe).zip").exists()
+    assert (tmp_path / ".duplicates" / "Mickey Mouse (Japan).zip").exists()
 
 
 def test_redundant_raw_disc_cleanup_alongside_chd(tmp_path):

@@ -22,10 +22,42 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 
 ## What it does
 
-- **Groups releases by title**, ignoring region/revision/language tags, and
-  picks a keeper using (in priority order): not-proto/beta/bad-dump/
-  Virtual-Console/Switch-Online → CHD over raw bin/cue/iso → best region
-  (configurable) → highest revision → largest file size (tiebreak).
+- **Groups releases by title**, ignoring region/revision/language tags,
+  and picks a keeper using (in priority order):
+  1. Not proto/beta (see below — these are routed away entirely, never
+     even compete here).
+  2. CHD over raw bin/cue/iso.
+  3. **Effective region**, a combined region + confirmed-English ranking:
+     - one of the top 2 configured regions (`USA`/`World` by default —
+       both long-standing conventions for including English content)
+       beats everything else outright;
+     - failing that, a release with an explicit `En` language tag (e.g.
+       `(En)` or `(En,Fr,De)`) — confirming English text is actually
+       present — beats a same-or-better *nominal* region that doesn't
+       confirm it (e.g. `Game (Japan) (En)` beats a plain
+       `Game (Europe)`, since `Europe` alone doesn't guarantee English
+       the way an explicit `(En)` tag does; but a plain `Game (World)`
+       still beats it, since `World` already implies English by
+       convention without needing the tag);
+     - otherwise, the normal configured region order (e.g. `World` beats
+       `Japan`) — this still wins outright over a same-or-better-tier
+       release that carries a non-standard tag, e.g.
+       `Game (World) (Collection of Something)` beats a plain
+       `Game (Japan)`, since `World` is simply the better tier and no
+       plain-`World` release exists to compete with instead.
+  4. Among releases tied on effective region: one carrying only a
+     region/revision/language/known-neutral tag (e.g. `SGB Enhanced`)
+     beats one with ANY other tag — compilation/service re-releases like
+     Virtual Console, Switch Online, Sega Channel, an anniversary/
+     classics collection, a bad dump, etc. (not a fixed list, just "does
+     it carry only region/revision/language/neutral tags").
+  5. A final English-tag tiebreak, for the rare case two releases are
+     still tied after all of the above.
+  6. Highest revision.
+  7. Largest file size (final tiebreak).
+
+  A release still wins if it's the only copy of that title on hand, even
+  with a non-standard tag.
 - **Bundles multi-file releases** (`.cue` + all its `.bin` tracks, or a
   multi-disc set) so they're compared as ONE release, not split into
   fake "duplicates" of each other.
