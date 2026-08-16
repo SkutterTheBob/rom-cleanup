@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.1
+
+- Changed `--make-m3u`'s layout: the `.m3u` playlist now sits directly in
+  `roms_dir` (e.g. `Game (USA).m3u`) instead of inside the release's own
+  subfolder, and the disc `.chd` files move into a per-release subfolder
+  nested under a single hidden `.chd/` folder in `roms_dir` (e.g.
+  `.chd/Game (USA)/`) instead of a plain visible one. The previous
+  same-folder layout made ES-DE/RetroArch show two entries for one game
+  -- the folder AND the `.m3u` -- since neither frontend actually
+  collapses a visible folder + `.m3u` pair into one entry; both do ignore
+  dot-prefixed directories when scanning, so hiding the discs' folder is
+  what actually gets the single-entry behavior the flag always intended.
+  Nesting every release's hidden folder under one shared `.chd/` also
+  keeps `roms_dir` itself from filling up with a dot-folder per release.
+  A release still sitting in an older layout is auto-migrated into the
+  current one (including deleting any now-stale old `.m3u`) the next
+  time `--make-m3u --apply` runs.
+
 ## 1.5.0
 
 - Added `--make-m3u`: finds disc-tagged `.chd` releases (e.g.

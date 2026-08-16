@@ -87,17 +87,21 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 - **Groups multi-disc games into ES-DE/RetroArch's `.m3u` layout**
   (`--make-m3u`) — finds disc-tagged `.chd` releases (e.g.
   `Game (USA) (Disc 1).chd`, `(Disc 2).chd`) and, for any title with 2+
-  discs, moves them all into a subfolder named after the release directly
-  under `roms_dir`, alongside an `.m3u` playlist (same name as the
-  folder) listing each disc in filename order — the layout ES-DE and
-  RetroArch expect to show and launch a multi-disc game as a single
-  entry. Discs are ordered numerically (`Disc 10` sorts after `Disc 2`,
-  not before it). A lone disc-tagged file with no siblings, or two files
-  claiming the same disc number, are left untouched — the latter is
-  flagged for manual review rather than guessed at. Skips releases
-  already grouped with an up-to-date `.m3u` (re-checks its content, so
-  adding a disc later is picked up on the next run), and cleans up any
-  source folder left empty by the move. CHD only — run
+  discs, writes an `.m3u` playlist directly under `roms_dir` (e.g.
+  `Game (USA).m3u`) listing each disc in filename order, while moving the
+  actual disc files into their own subfolder nested under a single hidden
+  `.chd/` folder in `roms_dir` (e.g. `.chd/Game (USA)/`) — ES-DE and
+  RetroArch both ignore dot-prefixed directories when scanning, so only
+  the `.m3u` shows up as a single entry, not a second folder entry for
+  the same game. Discs are ordered numerically (`Disc 10` sorts after
+  `Disc 2`, not before it). A lone disc-tagged file with no siblings, or
+  two files claiming the same disc number, are left untouched — the
+  latter is flagged for manual review rather than guessed at. Skips
+  releases already grouped with an up-to-date `.m3u` (re-checks its
+  content, so adding a disc later is picked up on the next run); a
+  release still sitting in an older layout (from before this
+  `.chd/`-nested layout existed) is automatically migrated into it.
+  Cleans up any source folder left empty by the move. CHD only — run
   `--convert-to-chd` first for multi-disc sets still in `.bin`/`.cue`
   form. Also runs standalone and respects `--apply`.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
@@ -120,7 +124,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--gamelist-clean` | Remove `<game>` entries containing `ZZZ(notgame)` from every `gamelist.xml` found under `roms_dir` (backs each changed file up to `.rom-cleanup-gamelist-xml.bak` first) |
 | `--convert-to-chd` | Convert every `.cue` found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
 | `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
-| `--make-m3u` | Group disc-tagged `.chd` releases with 2+ discs into a per-release subfolder under `roms_dir` with an `.m3u` playlist |
+| `--make-m3u` | Group disc-tagged `.chd` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden `.chd/` folder |
 | `--version` | Print the script version and exit |
 
 ## Installing chdman (for `--convert-to-chd`)
@@ -202,11 +206,12 @@ After `--make-m3u --apply`, a multi-disc release ends up like this:
 
 ```
 your-roms-folder/
-└── Final Fantasy VII (USA)/
-    ├── Final Fantasy VII (USA).m3u
-    ├── Final Fantasy VII (USA) (Disc 1).chd
-    ├── Final Fantasy VII (USA) (Disc 2).chd
-    └── Final Fantasy VII (USA) (Disc 3).chd
+├── Final Fantasy VII (USA).m3u
+└── .chd/                           # hidden -- ES-DE/RetroArch skip dot-folders
+    └── Final Fantasy VII (USA)/
+        ├── Final Fantasy VII (USA) (Disc 1).chd
+        ├── Final Fantasy VII (USA) (Disc 2).chd
+        └── Final Fantasy VII (USA) (Disc 3).chd
 ```
 
 ## Development
