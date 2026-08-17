@@ -136,6 +136,34 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   Cleans up any source folder left empty by the move. CHD only — run
   `--convert-to-chd` first for multi-disc sets still in `.bin`/`.cue`
   form. Also runs standalone and respects `--apply`.
+- **Isolates titles never officially released in North America**
+  (`--isolate-imports`) — moves every title with no `USA`- or
+  `World`-tagged release (both long-standing conventions for including
+  English content) into `<roms_dir>/Imports/`, keeping every region/
+  revision of that title together as a group; a title with even one
+  NA-tagged release stays in `roms_dir` untouched. No external list to
+  fetch — the ROM set's own filename tags already encode this, the same
+  way the rest of the tool reads them. Considers `roms_dir`'s direct
+  children only: a plain ROM file, a whole release subfolder (e.g. an
+  ungrouped multi-disc set — moved as one unit), or an `--make-m3u`
+  playlist (moved together with its hidden disc folder, so the
+  playlist's relative disc paths keep working from its new location).
+  BIOS- and proto/beta-tagged entries are left alone, same as the normal
+  scan; `.duplicates/`, `Imports/`, alpha-bucket leftover folders, and
+  common non-ROM asset folders some frontends keep alongside the roms
+  (`media`, `images`, `screenshots`, `videos`, `manuals`,
+  `downloaded_media`) are never treated as titles. Re-running is cheap —
+  anything already inside
+  `Imports/` is invisible to this pass, never reconsidered. Respects
+  `rom_filters.txt` (see below): a whole-title `[blacklist]` entry always
+  wins and keeps that title in place; a whole-title `[whitelist]` entry
+  restricts scope to only whitelisted titles; a release-specific
+  `[whitelist]` entry (pinning one exact release) also keeps that title
+  in place, even outside an active whole-title whitelist's scope — a
+  release-specific `[blacklist]` entry does NOT apply here, since its
+  meaning ("force this release to lose the duplicate comparison")
+  doesn't translate to "protect it from being moved". Also runs
+  standalone and respects `--apply`.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -157,6 +185,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--convert-to-chd` | Convert every `.cue` found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
 | `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
 | `--make-m3u` | Group disc-tagged `.chd` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden `.chd/` folder |
+| `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/Imports/`, keeping every region/revision of that title together |
 | `--version` | Print the script version and exit |
 
 ## Installing chdman (for `--convert-to-chd`)
@@ -244,6 +273,17 @@ your-roms-folder/
         ├── Final Fantasy VII (USA) (Disc 1).chd
         ├── Final Fantasy VII (USA) (Disc 2).chd
         └── Final Fantasy VII (USA) (Disc 3).chd
+```
+
+After `--isolate-imports --apply`, titles with no North American release
+move together into `Imports/`:
+
+```
+your-roms-folder/
+├── Super Game (USA).zip           # has a USA release -- stays put
+└── Imports/
+    ├── SaGa 2 (Japan).zip
+    └── SaGa 2 (Japan) (En).zip
 ```
 
 ## Development

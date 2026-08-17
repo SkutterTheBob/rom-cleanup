@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.7.0
+
+- Added `--isolate-imports`: moves every title with no `USA`- or
+  `World`-tagged release (both long-standing conventions for including
+  English content) into `<roms_dir>/Imports/`, keeping every region/
+  revision of that title together as a group; a title with even one
+  NA-tagged release stays in `roms_dir` untouched. No external list to
+  fetch -- reuses the ROM set's own filename tags, the same way the rest
+  of the tool reads them. Considers `roms_dir`'s direct children only: a
+  plain ROM file, a whole release subfolder (e.g. an ungrouped
+  multi-disc set, moved as one unit), or a `--make-m3u` playlist (moved
+  together with its hidden disc folder, keeping the playlist's relative
+  disc paths valid from its new location -- blocked with a warning
+  instead of silently renamed if the target already exists in
+  `Imports/`, to avoid desyncing the pair). BIOS- and proto/beta-tagged
+  entries are left alone, same as the normal scan; `.duplicates/`,
+  `Imports/`, alpha-bucket leftover folders, and common non-ROM asset
+  folders some frontends keep alongside the roms (`media`, `images`,
+  `screenshots`, `videos`, `manuals`, `downloaded_media`) are never
+  treated as titles. Anything already inside `Imports/` is invisible to this pass
+  on re-runs, so it's cheap to run repeatedly. Respects `rom_filters.txt`
+  (`--filter-file`): a whole-title `[blacklist]` entry always wins and
+  keeps a title in place; a whole-title `[whitelist]` entry restricts
+  scope to only whitelisted titles; a release-specific `[whitelist]`
+  entry (pinning one exact release) also keeps that title in place, even
+  outside an active whole-title whitelist's scope -- a release-specific
+  `[blacklist]` entry does NOT apply here, since its meaning ("force this
+  release to lose the duplicate comparison") doesn't translate to
+  "protect it from being moved". Respects `--apply` (dry-run preview by
+  default) and runs standalone.
+- Fixed `parse_filter_line()` (used by `rom_filters.txt` everywhere in
+  the tool) to tolerate a trailing file extension, e.g. pasting
+  `Streets of Rage II (Japan, Europe) (En,Ja).7z` straight out of a
+  directory listing now matches correctly -- the extension used to get
+  folded into the parsed title text, silently producing a `title_key`
+  that never matched the actual file's.
+
 ## 1.6.1
 
 - Fixed a data-loss bug: two files with the same name in different

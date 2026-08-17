@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -347,8 +347,17 @@ def parse_filter_line(line):
       "(SEGA Classic Collection)" will still match a release actually
       tagged "(USA, Europe) (SEGA Classic Collection)".
     Track/disc-piece tags (Track 01, Disc 2, ...) are ignored here too,
-    same as when parsing actual filenames.
+    same as when parsing actual filenames. A trailing file extension is
+    tolerated and stripped if present (e.g. pasting the full filename
+    "Streets of Rage II (Japan, Europe) (En,Ja).7z" straight out of a
+    directory listing still matches correctly) -- filter entries are
+    meant to be the bare title/release name, but this is an easy mistake
+    to make and silently produced a non-matching title otherwise.
     """
+    stripped, ext = os.path.splitext(line)
+    if ext.lower() in ROM_EXTENSIONS_DEFAULT:
+        line = stripped
+
     base_title, tags = extract_tags(line)
     title_key = normalize_title(base_title) or normalize_title(line)
     if not tags:
@@ -415,6 +424,39 @@ def load_filter_file(path):
                 result["{0}_releases".format(current)].append((title_key, tag_set, line))
 
     return result
+
+
+def resolve_filter_file(roms_dir, filter_file_arg):
+    """Resolve and load the rom_filters.txt filter file for roms_dir, per
+    the CLI's shared convention: an explicit filter_file_arg must exist
+    (hard error if not); otherwise <roms_dir>/rom_filters.txt is used
+    automatically if present. Warns if the resolved file has no
+    [whitelist]/[blacklist] entries at all.
+
+    Returns (parsed, filter_file_used): parsed is the same dict
+    load_filter_file() returns (all four keys empty if no filter file was
+    found), and filter_file_used is the path actually used, or None.
+    """
+    filter_path = filter_file_arg or os.path.join(roms_dir, DEFAULT_FILTER_FILENAME)
+    empty = {
+        "whitelist_titles": {}, "whitelist_releases": [],
+        "blacklist_titles": {}, "blacklist_releases": [],
+    }
+
+    if filter_file_arg and not os.path.isfile(filter_path):
+        print("Error: filter file not found: {0}".format(filter_path), file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(filter_path):
+        return empty, None
+
+    parsed = load_filter_file(filter_path)
+    if not any([parsed["whitelist_titles"], parsed["whitelist_releases"],
+                parsed["blacklist_titles"], parsed["blacklist_releases"]]):
+        print("Warning: filter file '{0}' has no [whitelist]/[blacklist] "
+              "entries -- nothing will be filtered.".format(filter_path),
+              file=sys.stderr)
+    return parsed, filter_path
 
 
 def unique_dest_path(dest_dir, filename, also_avoid=None):
@@ -1163,6 +1205,253 @@ def make_m3u_playlists(roms_dir, apply):
     return grouped, len(already_done)
 
 
+# ---- isolating titles never officially released in North America -------
+
+# Regions that count as "available in North America" for --isolate-imports:
+# an actual USA release, or a World release (sold in NA too, even without
+# a USA-specific tag).
+NA_REGIONS = {"usa", "world"}
+
+IMPORTS_DIR_NAME = "Imports"
+
+# Common non-ROM asset folders some frontends/collections keep directly
+# alongside the ROM files (e.g. ES-DE-style per-system media). These have
+# no title/tags of their own -- without this exclusion they'd be treated
+# as an untitled release with no recognized region and get swept into
+# Imports/, which would be wrong (and potentially disruptive, since some
+# frontends expect this folder at a fixed path relative to the roms).
+NON_TITLE_DIR_NAMES = {
+    "media", "images", "image", "screenshots", "screenshot",
+    "videos", "video", "manuals", "manual", "downloaded_media",
+}
+
+
+def tags_indicate_na_release(tags):
+    """True if any of these tags identifies the release as available in
+    North America -- i.e. carries "usa" or "world" as a recognized region
+    component, including combined tags like "USA, Europe".
+    """
+    for tag in tags:
+        parts = [p.strip().lower() for p in re.split(r"[,/]", tag)]
+        if any(p in NA_REGIONS for p in parts):
+            return True
+    return False
+
+
+def _is_bios_or_proto_beta_tagged(tags):
+    if any(t.strip().lower() == "bios" for t in tags):
+        return True
+    if any(is_proto_beta_tag(t) for t in tags):
+        return True
+    return False
+
+
+def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_titles=None,
+                          whitelist_releases=None):
+    """Find every title directly under roms_dir with NO North-American-
+    tagged release (no "USA" or "World" tag on ANY of its entries) and
+    plan moving every one of that title's entries into
+    <roms_dir>/Imports/, keeping every region/revision of the title
+    together as a group.
+
+    Only considers roms_dir's own direct children: a plain ROM file, an
+    .m3u playlist (see make_m3u_playlists -- its corresponding hidden
+    ".chd/<release>/" disc folder is moved alongside it, keeping the
+    playlist's relative disc paths valid), or a whole subfolder (treated
+    as one release unit, e.g. a multi-disc release not yet grouped via
+    --make-m3u). BIOS- and proto/beta-tagged entries are left alone, same
+    as the normal scan. .duplicates/, Imports/, the M3U hidden ".chd/"
+    folder, alpha-bucket leftover folders, and common non-ROM asset
+    folders some frontends keep alongside the roms (see
+    NON_TITLE_DIR_NAMES, e.g. "media", "images", "screenshots") are never
+    themselves treated as titles. Entries already inside Imports/ are
+    invisible to this pass (never reconsidered), making re-runs cheap.
+
+    blacklist_titles/whitelist_titles: the whole-title dicts from
+    load_filter_file() (rom_filters.txt), keyed by normalized title --
+    same file/format the normal duplicate scan reads. A blacklisted title
+    is never moved (matches its "never touch this game at all" meaning
+    everywhere else in the tool, and always wins over a whitelist, same
+    as the normal scan); when a whitelist is present, only whitelisted
+    titles are even considered, everything else is left alone.
+
+    whitelist_releases: release-specific whitelist entries (a line WITH
+    tags, e.g. "Streets of Rage II (Japan, Europe) (En,Ja)") pin that
+    exact release as the forced keeper in the normal scan -- here, a
+    title with any release matching one is treated as kept in place too
+    (and this bypasses the whole-title whitelist restriction above, since
+    pinning a specific release is itself a clear signal to leave that
+    title alone). Release-specific BLACKLIST entries are intentionally
+    NOT applied here: their meaning ("force this release to always lose
+    the duplicate comparison") doesn't translate to "protect it from
+    being moved" -- the opposite of what isolate-imports would need.
+
+    Returns (to_move, kept_titles, import_titles, blocked, filtered_out):
+        to_move:       [(current_path, final_path), ...]
+        kept_titles:   sorted display titles staying in roms_dir
+        import_titles: sorted display titles moving to Imports/
+        blocked:       [(title, reason), ...] for an .m3u release whose
+                        target already exists in Imports/ -- skipped
+                        rather than risking a renamed, desynced pair
+        filtered_out:  count of entries skipped due to the filter file
+    """
+    blacklist_titles = blacklist_titles or {}
+    whitelist_titles = whitelist_titles or {}
+    whitelist_releases = whitelist_releases or []
+    dup_dir_abs = os.path.abspath(dup_dir)
+    import_dir = os.path.join(roms_dir, IMPORTS_DIR_NAME)
+    titles = defaultdict(list)  # title_key -> [(display_title, tags, path, is_m3u), ...]
+
+    for name in sorted(os.listdir(roms_dir)):
+        full = os.path.join(roms_dir, name)
+        if os.path.abspath(full) == dup_dir_abs:
+            continue
+        if name.lower() == IMPORTS_DIR_NAME.lower():
+            continue
+        if name == M3U_HIDDEN_DIR_NAME:
+            continue  # handled together with its .m3u file, not on its own
+
+        if os.path.isdir(full):
+            if is_alpha_bucket_dirname(name) or name.strip().lower() in NON_TITLE_DIR_NAMES:
+                continue
+            stem, is_m3u = name, False
+        else:
+            stem, ext = os.path.splitext(name)
+            ext = ext.lower()
+            if ext == M3U_EXTENSION:
+                is_m3u = True
+            elif ext in ROM_EXTENSIONS_DEFAULT:
+                is_m3u = False
+            else:
+                continue
+
+        title, tags = extract_tags(stem)
+        if _is_bios_or_proto_beta_tagged(tags):
+            continue
+
+        title_key = normalize_title(title) or normalize_title(stem)
+        titles[title_key].append((title, tags, full, is_m3u))
+
+    to_move = []
+    kept_titles = []
+    import_titles = []
+    blocked = []
+    filtered_out = 0
+    reserved = set()
+
+    for title_key, entries in sorted(titles.items()):
+        display_title = entries[0][0]
+
+        if title_key in blacklist_titles:
+            filtered_out += len(entries)
+            continue
+
+        release_pinned = False
+        for _, tags, _, _ in entries:
+            release_key = tuple(sorted(t.lower() for t in tags if not is_part_tag(t)))
+            if find_release_filter_matches(title_key, release_key, whitelist_releases):
+                release_pinned = True
+                break
+
+        if not release_pinned and whitelist_titles and title_key not in whitelist_titles:
+            filtered_out += len(entries)
+            continue
+
+        if release_pinned or any(tags_indicate_na_release(tags) for _, tags, _, _ in entries):
+            kept_titles.append(display_title)
+            continue
+
+        import_titles.append(display_title)
+        for _, _, path, is_m3u in entries:
+            name = os.path.basename(path)
+
+            if is_m3u:
+                stem = os.path.splitext(name)[0]
+                final_path = os.path.join(import_dir, name)
+                if os.path.exists(final_path):
+                    blocked.append((display_title, "{0} already exists in {1}/".format(
+                        name, IMPORTS_DIR_NAME)))
+                    continue
+                to_move.append((path, final_path))
+
+                hidden_src = os.path.join(roms_dir, M3U_HIDDEN_DIR_NAME, stem)
+                if os.path.isdir(hidden_src):
+                    hidden_dest = os.path.join(import_dir, M3U_HIDDEN_DIR_NAME, stem)
+                    to_move.append((hidden_src, hidden_dest))
+            else:
+                final_path = unique_dest_path(import_dir, name, also_avoid=reserved)
+                reserved.add(final_path)
+                to_move.append((path, final_path))
+
+    return to_move, sorted(kept_titles), sorted(import_titles), blocked, filtered_out
+
+
+def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
+                     whitelist_titles=None, whitelist_releases=None, filter_file_used=None):
+    """Print (and, if apply, perform) the plan from plan_isolate_imports:
+    move every title with no North-American release into
+    <roms_dir>/Imports/. Returns (moved_titles, kept_titles).
+
+    blacklist_titles/whitelist_titles/whitelist_releases: passed straight
+    through to plan_isolate_imports -- see there for how rom_filters.txt
+    applies.
+    """
+    to_move, kept_titles, import_titles, blocked, filtered_out = plan_isolate_imports(
+        roms_dir, dup_dir, blacklist_titles=blacklist_titles,
+        whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases)
+
+    if filter_file_used:
+        print("Filter file used: {0}".format(filter_file_used))
+        if filtered_out:
+            print("Entries skipped by filter: {0}".format(filtered_out))
+
+    if not import_titles and not blocked:
+        print("No import-only titles found under {0} -- nothing to isolate.".format(roms_dir))
+        return 0, len(kept_titles)
+
+    if import_titles:
+        print("\nTitles with no North American release ({0}) -- moving to {1}/:".format(
+            len(import_titles), IMPORTS_DIR_NAME))
+        for title in import_titles:
+            print("  {0}".format(title))
+
+    for title, reason in blocked:
+        print("\n  Warning: {0!r} -- skipping ({1}).".format(title, reason), file=sys.stderr)
+
+    if not apply:
+        print("\nDRY RUN -- would move {0} file(s)/folder(s) for {1} title(s) into "
+              "{2}/ ({3} title(s) kept in {4}{5}). Re-run with --apply to do it.".format(
+                  len(to_move), len(import_titles), IMPORTS_DIR_NAME, len(kept_titles),
+                  os.path.basename(roms_dir) or roms_dir,
+                  "; {0} blocked".format(len(blocked)) if blocked else ""))
+        return len(import_titles), len(kept_titles)
+
+    import_dir = os.path.join(roms_dir, IMPORTS_DIR_NAME)
+    os.makedirs(import_dir, exist_ok=True)
+    moved = 0
+    errors = 0
+    for src, dest in to_move:
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(src, dest)
+            moved += 1
+        except OSError as e:
+            errors += 1
+            print("  ERROR moving {0} -> {1}: {2}".format(src, dest, e), file=sys.stderr)
+
+    print("\nMoved {0}/{1} file(s)/folder(s) for {2} title(s) into {3}/{4}.".format(
+        moved, len(to_move), len(import_titles), IMPORTS_DIR_NAME,
+        "; {0} error(s)".format(errors) if errors else ""))
+
+    removed_dirs = remove_now_empty_dirs(roms_dir, {os.path.join(roms_dir, M3U_HIDDEN_DIR_NAME)})
+    if removed_dirs:
+        print("\nRemoved {0} now-empty folder(s):".format(len(removed_dirs)))
+        for d in sorted(removed_dirs):
+            print("  {0}".format(os.path.relpath(d, roms_dir)))
+
+    return len(import_titles), len(kept_titles)
+
+
 def find_release_filter_matches(title_key, release_key, release_entries):
     """Return the list of (title_key, tag_set, line) entries from
     release_entries whose tag_set is a subset of this release's own tags
@@ -1681,6 +1970,25 @@ def main():
                               "number, are left alone. "
                               "Respects --apply (dry-run preview by default). "
                               "Runs standalone.")
+    parser.add_argument("--isolate-imports", action="store_true",
+                         help="Move every title with NO North-American-tagged "
+                              "release (no \"USA\" or \"World\" tag on any of its "
+                              "entries) into roms_dir/Imports/, keeping every "
+                              "region/revision of that title together. Titles with "
+                              "at least one USA/World release are left in roms_dir. "
+                              "Considers roms_dir's direct children only: ROM files, "
+                              "an --make-m3u playlist (moved together with its "
+                              "hidden disc folder), or a whole release subfolder. "
+                              "BIOS- and proto/beta-tagged entries are left alone. "
+                              "Respects the [whitelist]/[blacklist] entries in "
+                              "rom_filters.txt (--filter-file): a whole-title or "
+                              "release-specific whitelist entry keeps that title in "
+                              "place, a whole-title blacklist entry always wins and "
+                              "keeps it too; a release-specific blacklist entry does "
+                              "NOT apply here (it means \"lose the duplicate "
+                              "comparison\", not \"protect from being moved\"). "
+                              "Respects --apply (dry-run preview by "
+                              "default). Runs standalone.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -1695,6 +2003,7 @@ def main():
         (args.gamelist_clean, "--gamelist-clean"),
         (args.convert_to_chd, "--convert-to-chd"),
         (args.make_m3u, "--make-m3u"),
+        (args.isolate_imports, "--isolate-imports"),
     ) if enabled]
     if len(standalone_flags) > 1:
         print("Error: {0} can't be combined -- run them one at a time.".format(
@@ -1715,6 +2024,15 @@ def main():
 
     if args.make_m3u:
         make_m3u_playlists(roms_dir, args.apply)
+        return
+
+    if args.isolate_imports:
+        parsed_filter, filter_file_used = resolve_filter_file(roms_dir, args.filter_file)
+        isolate_imports(roms_dir, dup_dir, args.apply,
+                         blacklist_titles=parsed_filter["blacklist_titles"],
+                         whitelist_titles=parsed_filter["whitelist_titles"],
+                         whitelist_releases=parsed_filter["whitelist_releases"],
+                         filter_file_used=filter_file_used)
         return
 
     prior_scan = read_scan_marker(roms_dir)
@@ -1740,28 +2058,11 @@ def main():
         if args.ext else ROM_EXTENSIONS_DEFAULT
     )
 
-    filter_path = args.filter_file or os.path.join(roms_dir, DEFAULT_FILTER_FILENAME)
-    whitelist_titles = {}
-    whitelist_releases = {}
-    blacklist_titles = {}
-    blacklist_releases = {}
-    filter_file_used = None
-
-    if args.filter_file and not os.path.isfile(filter_path):
-        print("Error: filter file not found: {0}".format(filter_path), file=sys.stderr)
-        sys.exit(1)
-
-    if os.path.isfile(filter_path):
-        parsed = load_filter_file(filter_path)
-        whitelist_titles = parsed["whitelist_titles"]
-        whitelist_releases = parsed["whitelist_releases"]
-        blacklist_titles = parsed["blacklist_titles"]
-        blacklist_releases = parsed["blacklist_releases"]
-        filter_file_used = filter_path
-        if not any([whitelist_titles, whitelist_releases, blacklist_titles, blacklist_releases]):
-            print("Warning: filter file '{0}' has no [whitelist]/[blacklist] "
-                  "entries -- nothing will be filtered.".format(filter_path),
-                  file=sys.stderr)
+    parsed_filter, filter_file_used = resolve_filter_file(roms_dir, args.filter_file)
+    whitelist_titles = parsed_filter["whitelist_titles"]
+    whitelist_releases = parsed_filter["whitelist_releases"]
+    blacklist_titles = parsed_filter["blacklist_titles"]
+    blacklist_releases = parsed_filter["blacklist_releases"]
 
     plan = plan_duplicate_scan(
         roms_dir, dup_dir,

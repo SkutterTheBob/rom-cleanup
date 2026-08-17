@@ -445,6 +445,263 @@ def test_plan_m3u_grouping_migrates_old_per_release_hidden_dir_layout(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# Unit tests: isolating titles never officially released in North America
+# ---------------------------------------------------------------------
+
+def default_dup_dir(tmp_path):
+    return str(tmp_path / ".duplicates")
+
+
+def test_tags_indicate_na_release_usa_and_world():
+    assert rc.tags_indicate_na_release(["USA"])
+    assert rc.tags_indicate_na_release(["World"])
+    assert rc.tags_indicate_na_release(["USA, Europe"])
+    assert not rc.tags_indicate_na_release(["Japan"])
+    assert not rc.tags_indicate_na_release(["Europe"])
+    assert not rc.tags_indicate_na_release(["Japan", "En"])
+
+
+def test_plan_isolate_imports_keeps_na_titles(tmp_path):
+    touch(tmp_path / "Super Game (USA).zip")
+    touch(tmp_path / "World Racer (World).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert blocked == []
+    assert kept == ["Super Game", "World Racer"]
+    assert imports == []
+
+
+def test_plan_isolate_imports_moves_import_only_title(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "SaGa 2 (Japan) (En).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert kept == []
+    assert imports == ["SaGa 2"]
+    assert len(to_move) == 2
+    dest_dirs = {os.path.dirname(dest) for _, dest in to_move}
+    assert dest_dirs == {str(tmp_path / "Imports")}
+
+
+def test_plan_isolate_imports_mixed_title_stays_if_any_release_is_na(tmp_path):
+    """A title with BOTH a Japan release and a USA release must stay in
+    roms_dir entirely -- having at least one NA release is enough.
+    """
+    touch(tmp_path / "Mixed Game (Japan).zip")
+    touch(tmp_path / "Mixed Game (USA).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert kept == ["Mixed Game"]
+    assert imports == []
+
+
+def test_plan_isolate_imports_ignores_bios_and_proto_beta(tmp_path):
+    touch(tmp_path / "PSX [BIOS].bin")
+    touch(tmp_path / "Unreleased (Japan) (Proto).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert kept == []
+    assert imports == []
+
+
+def test_plan_isolate_imports_ignores_duplicates_and_imports_dirs(tmp_path):
+    touch(tmp_path / ".duplicates" / "Whatever (USA).zip")
+    touch(tmp_path / "Imports" / "Already There (Japan).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert kept == []
+    assert imports == []
+
+
+def test_plan_isolate_imports_ignores_alpha_bucket_folders(tmp_path):
+    touch(tmp_path / "A" / "Aladdin (Japan).zip")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert kept == []
+    assert imports == []
+
+
+def test_plan_isolate_imports_ignores_non_title_asset_folders(tmp_path):
+    """Regression test for the reported bug: a "media" folder (common in
+    ES-DE/frontend setups for box art, screenshots, videos alongside the
+    roms) has no tags of its own and must not be treated as an untitled
+    release with no NA tag and swept into Imports/.
+    """
+    touch(tmp_path / "Super Game (USA).zip")
+    touch(tmp_path / "media" / "screenshots" / "super game.png")
+    touch(tmp_path / "images" / "super game.jpg")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert imports == []
+    assert kept == ["Super Game"]
+
+
+def test_plan_isolate_imports_moves_whole_release_subfolder_as_one_unit(tmp_path):
+    release_dir = tmp_path / "Old Style CD (Japan)"
+    touch(release_dir / "Old Style CD (Japan).cue")
+    touch(release_dir / "Old Style CD (Japan).bin")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert imports == ["Old Style CD"]
+    assert len(to_move) == 1
+    src, dest = to_move[0]
+    assert src == str(release_dir)
+    assert dest == str(tmp_path / "Imports" / "Old Style CD (Japan)")
+
+
+def test_plan_isolate_imports_moves_m3u_with_its_hidden_disc_folder(tmp_path):
+    hidden_dir = tmp_path / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)"
+    touch(hidden_dir / "SaGa CD (Japan) (Disc 1).chd")
+    touch(hidden_dir / "SaGa CD (Japan) (Disc 2).chd")
+    (tmp_path / "SaGa CD (Japan).m3u").write_text(
+        ".chd/SaGa CD (Japan)/SaGa CD (Japan) (Disc 1).chd\n"
+        ".chd/SaGa CD (Japan)/SaGa CD (Japan) (Disc 2).chd\n", encoding="utf-8")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert imports == ["SaGa CD"]
+    assert blocked == []
+    srcs = {src for src, _ in to_move}
+    assert str(tmp_path / "SaGa CD (Japan).m3u") in srcs
+    assert str(hidden_dir) in srcs
+    dests = {dest for _, dest in to_move}
+    assert str(tmp_path / "Imports" / "SaGa CD (Japan).m3u") in dests
+    assert str(tmp_path / "Imports" / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)") in dests
+
+
+def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path):
+    """An .m3u/hidden-folder pair must never be silently renamed on
+    collision -- that would desync the playlist's relative disc paths
+    from the folder they actually live in. Blocked and reported instead.
+    """
+    hidden_dir = tmp_path / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)"
+    touch(hidden_dir / "SaGa CD (Japan) (Disc 1).chd")
+    (tmp_path / "SaGa CD (Japan).m3u").write_text(
+        ".chd/SaGa CD (Japan)/SaGa CD (Japan) (Disc 1).chd\n", encoding="utf-8")
+    touch(tmp_path / "Imports" / "SaGa CD (Japan).m3u")  # pre-existing collision
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert len(blocked) == 1
+    assert blocked[0][0] == "SaGa CD"
+
+
+def test_plan_isolate_imports_blacklisted_title_is_never_moved(tmp_path):
+    """Regression test: a whole-title blacklist entry means "never touch
+    this game at all", same as everywhere else in the tool -- it must not
+    be moved to Imports/ even though it has no NA release.
+    """
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "Protected Import (Japan).zip")
+    blacklist_titles = {"protected import": "Protected Import"}
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path), blacklist_titles=blacklist_titles)
+
+    assert imports == ["SaGa 2"]
+    assert "Protected Import" not in imports
+    assert "Protected Import" not in kept
+    assert filtered_out == 1
+
+
+def test_plan_isolate_imports_whitelist_restricts_scope(tmp_path):
+    """Regression test: when a whitelist is present, only whitelisted
+    titles are considered at all -- everything else is left untouched,
+    same "restrict this run to ONLY these titles" meaning as the normal
+    scan.
+    """
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "Another Import (Japan).zip")
+    whitelist_titles = {"saga 2": "SaGa 2"}
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path), whitelist_titles=whitelist_titles)
+
+    assert imports == ["SaGa 2"]
+    assert "Another Import" not in imports
+    assert "Another Import" not in kept
+    assert filtered_out == 1
+
+
+def test_plan_isolate_imports_release_specific_whitelist_pin_keeps_title(tmp_path):
+    """Regression test for the reported Streets of Rage II bug: a
+    release-specific whitelist entry (a line WITH tags) must keep that
+    title in place too, not just a whole-title entry.
+    """
+    touch(tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z")
+    title_key, tag_set = rc.parse_filter_line("Streets of Rage II (Japan, Europe) (En,Ja)")
+    whitelist_releases = [(title_key, tag_set, "Streets of Rage II (Japan, Europe) (En,Ja)")]
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path), whitelist_releases=whitelist_releases)
+
+    assert to_move == []
+    assert imports == []
+    assert kept == ["Streets of Rage II"]
+
+
+def test_plan_isolate_imports_release_pin_bypasses_unrelated_whitelist_restriction(tmp_path):
+    """A release-specific pin for one title must still work even when a
+    whole-title whitelist is active that does NOT name it -- the pin is
+    itself a clear signal to leave that title alone, regardless of scope.
+    A third, wholly unrelated title (neither pinned nor whitelisted)
+    stays excluded, confirming the restriction still applies normally.
+    """
+    touch(tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z")
+    touch(tmp_path / "Some Other Game (USA).zip")
+    touch(tmp_path / "Unrelated Game (Japan).zip")
+    title_key, tag_set = rc.parse_filter_line("Streets of Rage II (Japan, Europe) (En,Ja)")
+    whitelist_releases = [(title_key, tag_set, "Streets of Rage II (Japan, Europe) (En,Ja)")]
+    whitelist_titles = {"some other game": "Some Other Game"}
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path),
+        whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases)
+
+    assert "Streets of Rage II" in kept  # pinned -- kept despite not being whitelisted
+    assert "Some Other Game" in kept     # whitelisted, has a USA release
+    assert "Unrelated Game" not in kept
+    assert "Unrelated Game" not in imports
+    assert imports == []
+
+
+def test_plan_isolate_imports_blacklist_title_wins_over_release_whitelist_pin(tmp_path):
+    """Regression test matching the documented rule everywhere else in
+    the tool: "Blacklist always wins over whitelist for the same
+    release."
+    """
+    touch(tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z")
+    title_key, tag_set = rc.parse_filter_line("Streets of Rage II (Japan, Europe) (En,Ja)")
+    whitelist_releases = [(title_key, tag_set, "Streets of Rage II (Japan, Europe) (En,Ja)")]
+    blacklist_titles = {"streets of rage ii": "Streets of Rage II"}
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path),
+        blacklist_titles=blacklist_titles, whitelist_releases=whitelist_releases)
+
+    assert to_move == []
+    assert imports == []
+    assert kept == []
+    assert filtered_out == 1
+
+
+# ---------------------------------------------------------------------
 # Unit tests: cue sheet FILE-reference case-mismatch detection
 # ---------------------------------------------------------------------
 
@@ -822,6 +1079,20 @@ def test_parse_filter_line_release_specific():
         "Shadow Dancer - The Secret of Shinobi (World)")
     assert title_key == "shadow dancer the secret of shinobi"
     assert tag_set == frozenset({"world"})
+
+
+def test_parse_filter_line_strips_trailing_extension():
+    """Regression test: pasting the full filename (with extension)
+    straight out of a directory listing must still match correctly --
+    the extension used to get folded into the title text, producing a
+    title_key that never matched the actual file's.
+    """
+    with_ext = rc.parse_filter_line(
+        "Streets of Rage II (Japan, Europe) (En,Ja).7z")
+    without_ext = rc.parse_filter_line(
+        "Streets of Rage II (Japan, Europe) (En,Ja)")
+    assert with_ext == without_ext
+    assert with_ext == ("streets of rage ii", frozenset({"japan, europe", "en,ja"}))
 
 
 def test_find_release_filter_matches_partial_tags():
@@ -2066,6 +2337,153 @@ def test_make_m3u_and_convert_to_chd_cannot_combine(tmp_path):
 
     assert result.returncode != 0
     assert "can't be combined" in result.stderr
+
+
+def test_isolate_imports_dry_run_does_not_move_anything(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+
+    result = run_script(tmp_path, "--isolate-imports")
+
+    assert "DRY RUN" in result.stdout
+    assert (tmp_path / "SaGa 2 (Japan).zip").exists()
+    assert not (tmp_path / "Imports").exists()
+
+
+def test_isolate_imports_apply_moves_import_only_titles_together(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "SaGa 2 (Japan) (En).zip")
+    touch(tmp_path / "Super Game (USA).zip")
+
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+    assert (tmp_path / "Imports" / "SaGa 2 (Japan) (En).zip").exists()
+    assert (tmp_path / "Super Game (USA).zip").exists()
+    assert "Moved 2/2" in result.stdout
+
+
+def test_isolate_imports_world_release_counts_as_na(tmp_path):
+    touch(tmp_path / "World Racer (World).zip")
+
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "World Racer (World).zip").exists()
+    assert not (tmp_path / "Imports").exists()
+    assert "No import-only titles found" in result.stdout
+
+
+def test_isolate_imports_leaves_bios_and_proto_beta_alone(tmp_path):
+    touch(tmp_path / "PSX [BIOS].bin")
+    touch(tmp_path / "Unreleased (Japan) (Proto).zip")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "PSX [BIOS].bin").exists()
+    assert (tmp_path / "Unreleased (Japan) (Proto).zip").exists()
+    assert not (tmp_path / "Imports").exists()
+
+
+def test_isolate_imports_moves_whole_multi_file_release_folder(tmp_path):
+    release_dir = tmp_path / "Old Style CD (Japan)"
+    touch(release_dir / "Old Style CD (Japan).cue")
+    touch(release_dir / "Old Style CD (Japan).bin")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "Imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).cue").exists()
+    assert (tmp_path / "Imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).bin").exists()
+    assert not release_dir.exists()
+
+
+def test_isolate_imports_leaves_media_folder_alone(tmp_path):
+    """End-to-end regression test for the reported bug: a "media" asset
+    folder alongside the roms must never be swept into Imports/.
+    """
+    touch(tmp_path / "Super Game (USA).zip")
+    touch(tmp_path / "media" / "screenshots" / "super game.png")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "media" / "screenshots" / "super game.png").exists()
+    assert not (tmp_path / "Imports").exists()
+
+
+def test_isolate_imports_rerun_is_idempotent(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert "No import-only titles found" in result.stdout
+    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+
+
+def test_isolate_imports_moves_m3u_and_hidden_disc_folder_with_working_playlist(tmp_path):
+    """End-to-end regression test: after --isolate-imports moves an
+    --make-m3u-grouped release, the .m3u's relative disc paths must still
+    resolve correctly from its new location.
+    """
+    stub = write_chdman_stub(tmp_path)
+    touch(tmp_path / "SaGa CD (Japan) (Disc 1).chd")
+    touch(tmp_path / "SaGa CD (Japan) (Disc 2).chd")
+    run_script(tmp_path, "--make-m3u", "--chdman-path", stub, "--apply")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    m3u_path = tmp_path / "Imports" / "SaGa CD (Japan).m3u"
+    assert m3u_path.exists()
+    content = m3u_path.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        if line.strip():
+            assert (m3u_path.parent / line.strip()).exists(), line
+    assert not (tmp_path / rc.M3U_HIDDEN_DIR_NAME).exists()
+
+
+def test_isolate_imports_and_make_m3u_cannot_combine(tmp_path):
+    result = run_script(tmp_path, "--isolate-imports", "--make-m3u")
+
+    assert result.returncode != 0
+    assert "can't be combined" in result.stderr
+
+
+def test_isolate_imports_respects_blacklist(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "Protected Import (Japan).zip")
+    (tmp_path / "rom_filters.txt").write_text("[blacklist]\nProtected Import\n")
+
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "Protected Import (Japan).zip").exists()
+    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+    assert "Filter file used" in result.stdout
+
+
+def test_isolate_imports_respects_whitelist(tmp_path):
+    touch(tmp_path / "SaGa 2 (Japan).zip")
+    touch(tmp_path / "Another Import (Japan).zip")
+    (tmp_path / "rom_filters.txt").write_text("[whitelist]\nSaGa 2\n")
+
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "Another Import (Japan).zip").exists()
+    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+
+
+def test_isolate_imports_respects_release_specific_whitelist_pin(tmp_path):
+    """End-to-end regression test for the reported Streets of Rage II
+    bug, including the extension the user pasted straight into the
+    filter file (which must be tolerated/stripped, not just the bare
+    documented format).
+    """
+    touch(tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z")
+    (tmp_path / "rom_filters.txt").write_text(
+        "[whitelist]\nStreets of Rage II (Japan, Europe) (En,Ja).7z\n")
+
+    result = run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert (tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z").exists()
+    assert not (tmp_path / "Imports").exists()
+    assert "No import-only titles found" in result.stdout
 
 
 def test_blacklist_title_fully_protects(tmp_path):
