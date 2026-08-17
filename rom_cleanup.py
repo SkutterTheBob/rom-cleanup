@@ -72,6 +72,10 @@ def is_proto_beta_tag(tag):
     return bool(PROTO_BETA_RE.match(tag.strip()))
 
 
+def is_program_tag(tag):
+    return tag.strip().lower() == "program"
+
+
 def is_part_tag(tag):
     t = tag.strip()
     return bool(PART_TAG_RE.match(t) or PART_TAG_RE_ALT.match(t))
@@ -1247,10 +1251,18 @@ def tags_indicate_na_release(tags):
     return False
 
 
-def _is_bios_or_proto_beta_tagged(tags):
+def _is_non_game_tagged(tags):
+    """True for [BIOS], proto/beta, or (Program) tagged entries -- the same
+    categories the normal scan pulls out unconditionally in scan_rom_files().
+    A (Program) utility/test disc (e.g. "Sega Channel", "CDX Pro") isn't a
+    foreign release of a real game, so it shouldn't be swept into .imports/
+    just for lacking a USA/World tag.
+    """
     if any(t.strip().lower() == "bios" for t in tags):
         return True
     if any(is_proto_beta_tag(t) for t in tags):
+        return True
+    if any(is_program_tag(t) for t in tags):
         return True
     return False
 
@@ -1309,8 +1321,8 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     ".chd/<release>/" disc folder is moved alongside it, keeping the
     playlist's relative disc paths valid), or a whole subfolder (treated
     as one release unit, e.g. a multi-disc release not yet grouped via
-    --make-m3u). BIOS- and proto/beta-tagged entries are left alone, same
-    as the normal scan. .duplicates/, .imports/, the M3U hidden ".chd/"
+    --make-m3u). BIOS-, proto/beta-, and (Program)-tagged entries are left
+    alone, same as the normal scan. .duplicates/, .imports/, the M3U hidden ".chd/"
     folder, alpha-bucket leftover folders, and common non-ROM asset
     folders some frontends keep alongside the roms (see
     NON_TITLE_DIR_NAMES, e.g. "media", "images", "screenshots") are never
@@ -1376,7 +1388,7 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
                 continue
 
         title, tags = extract_tags(stem)
-        if _is_bios_or_proto_beta_tagged(tags):
+        if _is_non_game_tagged(tags):
             continue
 
         title_key = normalize_title(title) or normalize_title(stem)
@@ -1544,6 +1556,7 @@ def find_release_filter_matches(title_key, release_key, release_entries):
 # lost the duplicate comparison go straight into dup_dir itself.
 BIOS_SUBDIR = "bios"
 PROTO_BETA_SUBDIR = "Proto-Beta"
+PROGRAM_SUBDIR = "Program"
 REDUNDANT_DISC_SUBDIR = "Redundant-Raw-Disc"
 
 
@@ -1571,16 +1584,17 @@ TitleDecision = namedtuple("TitleDecision", [
 # different folders can never be planned onto the same destination path.
 ScanPlan = namedtuple("ScanPlan", [
     "decisions", "dup_moves", "bios_moves", "proto_beta_moves",
-    "redundant_moves", "skipped", "filtered_out", "blacklist_hits",
-    "whitelist_hits", "pin_hits", "force_dup_hits", "warnings",
-    "total_titles", "total_releases", "kept_files", "dup_files",
+    "program_moves", "redundant_moves", "skipped", "filtered_out",
+    "blacklist_hits", "whitelist_hits", "pin_hits", "force_dup_hits",
+    "warnings", "total_titles", "total_releases", "kept_files", "dup_files",
 ])
 
 
 def all_planned_moves(plan):
     """Every (src, dest) pair in a ScanPlan, in the order they're reported."""
     return (list(plan.dup_moves) + list(plan.bios_moves)
-            + list(plan.proto_beta_moves) + list(plan.redundant_moves))
+            + list(plan.proto_beta_moves) + list(plan.program_moves)
+            + list(plan.redundant_moves))
 
 
 def _plan_move(src, dest_dir, reserved):
@@ -1607,17 +1621,23 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
     track/disc-number tags. Different release_keys under the same title are
     what get treated as real duplicates (different region/rev/etc).
 
-    Files tagged [BIOS] or proto/beta are pulled out here rather than being
-    compared as duplicates -- they're routed to their own dup_dir subfolder
-    regardless of what else exists for that title.
+    Files tagged [BIOS], proto/beta, or (Program) are pulled out here rather
+    than being compared as duplicates -- they're routed to their own
+    dup_dir subfolder regardless of what else exists for that title. This
+    matters most for (Program) test/utility discs (e.g. "Sega Channel",
+    "CDX Pro"): each is typically the only file under its own made-up
+    title, so without pulling it out unconditionally here, the "never lose
+    the only copy of a title" guard in decide_title_keeper() would keep it
+    in place forever no matter how it's tagged.
 
-    Returns (titles, bios_files, proto_beta_files, skipped, filtered_out,
-    blacklist_hits, whitelist_hits), where titles is
+    Returns (titles, bios_files, proto_beta_files, program_files, skipped,
+    filtered_out, blacklist_hits, whitelist_hits), where titles is
     {title_key: {release_key: [(path, tags), ...]}}.
     """
     titles = defaultdict(lambda: defaultdict(list))
     bios_files = []
     proto_beta_files = []
+    program_files = []
     skipped = []
     filtered_out = 0
     blacklist_hits = defaultdict(int)   # title_key -> files skipped (title-level)
@@ -1658,13 +1678,17 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
                 bios_files.append(fpath)
                 continue
 
+            if any(is_program_tag(t) for t in tags):
+                program_files.append(fpath)
+                continue
+
             non_part_tags = tuple(sorted(
                 t.lower() for t in tags if not is_part_tag(t)
             ))
             titles[title_key][non_part_tags].append((fpath, tags))
 
-    return (titles, bios_files, proto_beta_files, skipped, filtered_out,
-            blacklist_hits, whitelist_hits)
+    return (titles, bios_files, proto_beta_files, program_files, skipped,
+            filtered_out, blacklist_hits, whitelist_hits)
 
 
 def split_redundant_raw_disc(titles):
@@ -1791,8 +1815,8 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
     blacklist_titles = blacklist_titles or {}
     blacklist_releases = blacklist_releases or []
 
-    (titles, bios_files, proto_beta_files, skipped, filtered_out,
-     blacklist_hits, whitelist_hits) = scan_rom_files(
+    (titles, bios_files, proto_beta_files, program_files, skipped,
+     filtered_out, blacklist_hits, whitelist_hits) = scan_rom_files(
         roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles)
 
     redundant_disc_files = split_redundant_raw_disc(titles)
@@ -1837,6 +1861,8 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
                   for f in sorted(bios_files)]
     proto_beta_moves = [_plan_move(f, os.path.join(dup_dir, PROTO_BETA_SUBDIR), reserved)
                         for f in sorted(proto_beta_files)]
+    program_moves = [_plan_move(f, os.path.join(dup_dir, PROGRAM_SUBDIR), reserved)
+                     for f in sorted(program_files)]
     redundant_moves = [_plan_move(f, os.path.join(dup_dir, REDUNDANT_DISC_SUBDIR), reserved)
                        for f in sorted(redundant_disc_files)]
 
@@ -1845,6 +1871,7 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
         dup_moves=dup_moves,
         bios_moves=bios_moves,
         proto_beta_moves=proto_beta_moves,
+        program_moves=program_moves,
         redundant_moves=redundant_moves,
         skipped=skipped,
         filtered_out=filtered_out,
@@ -1891,6 +1918,7 @@ def print_scan_plan(plan, roms_dir, verbose=False):
     for moves, header, label in (
         (plan.bios_moves, "BIOS files ({0} found):", "BIOS"),
         (plan.proto_beta_moves, "Proto/Beta files ({0} found):", "PROTO/BETA"),
+        (plan.program_moves, "Program files ({0} found):", "PROGRAM"),
         (plan.redundant_moves,
          "Redundant raw disc files ({0} found, CHD already present):", "REDUNDANT"),
     ):
@@ -1945,16 +1973,17 @@ def log_run(roms_dir, mode, filter_file_used, summary, moved=None, errors=0):
         lines.append("filter_file: {0}".format(filter_file_used or "(none)"))
         lines.append(
             "games={0} releases={1} kept={2} dup={3} bios={4} "
-            "proto_beta={5} redundant={6} filtered={7}".format(
+            "proto_beta={5} program={6} redundant={7} filtered={8}".format(
                 summary["games"], summary["releases"], summary["kept"],
                 summary["dup"], summary["bios"], summary["proto_beta"],
-                summary["redundant"], summary["filtered"]
+                summary["program"], summary["redundant"], summary["filtered"]
             )
         )
         if moved is not None:
             lines.append("moved: {0}/{1}  errors: {2}".format(
                 moved,
-                summary["dup"] + summary["bios"] + summary["proto_beta"] + summary["redundant"],
+                summary["dup"] + summary["bios"] + summary["proto_beta"]
+                + summary["program"] + summary["redundant"],
                 errors))
         lines.append("")
 
@@ -2053,7 +2082,8 @@ def main():
                               "Considers roms_dir's direct children only: ROM files, "
                               "an --make-m3u playlist (moved together with its "
                               "hidden disc folder), or a whole release subfolder. "
-                              "BIOS- and proto/beta-tagged entries are left alone. "
+                              "BIOS-, proto/beta-, and (Program)-tagged entries "
+                              "are left alone. "
                               "Respects the [whitelist]/[blacklist] entries in "
                               "rom_filters.txt (--filter-file): a whole-title or "
                               "release-specific whitelist entry keeps that title in "
@@ -2161,6 +2191,7 @@ def main():
     print("Files marked as dupes:     {0}".format(plan.dup_files))
     print("BIOS files set aside:      {0}".format(len(plan.bios_moves)))
     print("Proto/Beta files set aside:{0}".format(len(plan.proto_beta_moves)))
+    print("Program files set aside:   {0}".format(len(plan.program_moves)))
     print("Redundant raw disc files:  {0}".format(len(plan.redundant_moves)))
     if filter_file_used:
         print("Filter file used:          {0}".format(filter_file_used))
@@ -2220,7 +2251,8 @@ def main():
         "games": plan.total_titles, "releases": plan.total_releases,
         "kept": plan.kept_files, "dup": plan.dup_files,
         "bios": len(plan.bios_moves), "proto_beta": len(plan.proto_beta_moves),
-        "redundant": len(plan.redundant_moves), "filtered": plan.filtered_out,
+        "program": len(plan.program_moves), "redundant": len(plan.redundant_moves),
+        "filtered": plan.filtered_out,
     }
     run_mode = "APPLY" if args.apply else "DRY RUN"
 

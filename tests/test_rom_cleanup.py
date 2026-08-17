@@ -511,6 +511,20 @@ def test_plan_isolate_imports_ignores_bios_and_proto_beta(tmp_path):
     assert imports == []
 
 
+def test_plan_isolate_imports_ignores_program_tagged_files(tmp_path):
+    """A (Program) utility disc with no USA/World tag (e.g. a Japan-only
+    test/dev tool) isn't a foreign release of a real game -- it shouldn't
+    be swept into .imports/ just for lacking an NA region tag.
+    """
+    touch(tmp_path / "Some Tool (Japan) (Program).7z")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_move == []
+    assert kept == []
+    assert imports == []
+
+
 def test_plan_isolate_imports_ignores_duplicates_and_imports_dirs(tmp_path):
     touch(tmp_path / ".duplicates" / "Whatever (USA).zip")
     touch(tmp_path / ".imports" / "Already There (Japan).zip")
@@ -1381,7 +1395,7 @@ def test_scan_rom_files_groups_multi_file_release_as_one(tmp_path):
     write_rom(tmp_path, "G (USA) (Track 02).bin")
     write_rom(tmp_path, "G (USA).cue")
 
-    titles, _bios, _proto, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+    titles, _bios, _proto, _program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
         str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
 
     assert list(titles) == ["g"]
@@ -1395,12 +1409,24 @@ def test_scan_rom_files_separates_bios_and_proto_beta(tmp_path):
     write_rom(tmp_path, "Machine [BIOS].bin")
     write_rom(tmp_path, "G (USA) (Proto).zip")
 
-    titles, bios, proto, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+    titles, bios, proto, _program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
         str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
 
     assert list(titles) == ["g"]
     assert [os.path.basename(p) for p in bios] == ["Machine [BIOS].bin"]
     assert [os.path.basename(p) for p in proto] == ["G (USA) (Proto).zip"]
+
+
+def test_scan_rom_files_pulls_out_program_tagged_files(tmp_path):
+    write_rom(tmp_path, "G (USA).zip")
+    write_rom(tmp_path, "Sega Channel (USA) (General Instrument) (Program).7z")
+
+    titles, _bios, _proto, program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+        str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
+
+    assert list(titles) == ["g"]
+    assert [os.path.basename(p) for p in program] == [
+        "Sega Channel (USA) (General Instrument) (Program).7z"]
 
 
 def test_split_redundant_raw_disc_leaves_release_holding_the_chd(tmp_path):
@@ -1432,6 +1458,7 @@ def test_plan_duplicate_scan_routes_each_category_to_its_own_subfolder(tmp_path)
     write_rom(tmp_path, "H (USA) (Proto).zip")
     write_rom(tmp_path, "J (USA).chd")
     write_rom(tmp_path, "J (USA).cue")
+    write_rom(tmp_path, "Sega Channel (USA) (General Instrument) (Program).7z")
 
     dup_dir = default_dup_dir(tmp_path)
     plan = rc.plan_duplicate_scan(str(tmp_path), dup_dir)
@@ -1442,7 +1469,24 @@ def test_plan_duplicate_scan_routes_each_category_to_its_own_subfolder(tmp_path)
     assert dest_dirs(plan.dup_moves) == {".duplicates"}
     assert dest_dirs(plan.bios_moves) == {rc.BIOS_SUBDIR}
     assert dest_dirs(plan.proto_beta_moves) == {rc.PROTO_BETA_SUBDIR}
+    assert dest_dirs(plan.program_moves) == {rc.PROGRAM_SUBDIR}
     assert dest_dirs(plan.redundant_moves) == {rc.REDUNDANT_DISC_SUBDIR}
+
+
+def test_plan_duplicate_scan_program_tag_bypasses_never_lose_a_game_guard(tmp_path):
+    """A (Program) utility disc (e.g. "Sega Channel", "CDX Pro") is
+    typically the ONLY file under its own made-up title -- if it weren't
+    pulled out unconditionally in scan_rom_files(), decide_title_keeper()'s
+    "never lose the only copy of a title" guard would keep it in roms_dir
+    forever no matter how it's tagged.
+    """
+    write_rom(tmp_path, "Sega Channel (USA) (General Instrument) (Program).7z")
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert plan.total_titles == 0  # never even entered title grouping
+    assert len(plan.program_moves) == 1
+    assert plan.dup_moves == []
 
 
 def test_plan_duplicate_scan_counts_line_up_with_planned_moves(tmp_path):
@@ -1504,6 +1548,24 @@ def test_apply_does_not_overwrite_same_named_duplicates(tmp_path):
     survived = sorted(p.read_bytes() for p in (tmp_path / ".duplicates").iterdir()
                       if p.is_file())
     assert survived == [b"payload-A", b"payload-B"]
+
+
+def test_apply_moves_program_tagged_sole_copy_out_of_roms_dir(tmp_path):
+    """A (Program) utility disc is normally the only file under its own
+    made-up title (nothing else competes for the "Sega Channel" title), so
+    without the unconditional pull-out it would never leave roms_dir --
+    the blacklist/whitelist mechanism can't touch a release with nothing
+    to lose a comparison to (see the "never lose a game" guard).
+    """
+    touch(tmp_path / "Sega Channel (USA) (General Instrument) (Program).7z")
+    touch(tmp_path / "Keeper (USA).zip")
+
+    run_script(tmp_path, "--apply")
+
+    assert not (tmp_path / "Sega Channel (USA) (General Instrument) (Program).7z").exists()
+    assert (tmp_path / ".duplicates" / rc.PROGRAM_SUBDIR
+            / "Sega Channel (USA) (General Instrument) (Program).7z").exists()
+    assert (tmp_path / "Keeper (USA).zip").exists()
 
 
 # ---------------------------------------------------------------------
