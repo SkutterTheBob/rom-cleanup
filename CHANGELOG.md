@@ -45,6 +45,20 @@
   directory listing now matches correctly -- the extension used to get
   folded into the parsed title text, silently producing a `title_key`
   that never matched the actual file's.
+- Fixed: a `(Program)` tagged file (e.g. `Sega Channel (USA)
+  (General Instrument) (Program).7z`, `CDX Pro`, `Sega Sound Tool`) is a
+  test/utility disc, not a game -- and it's typically the only file under
+  its own made-up title, so nothing ever competes with it in a duplicate
+  comparison. It used to stay in `roms_dir` forever no matter what
+  `rom_filters.txt` said: the "never lose the only copy of a title" guard
+  exists to protect real games, and a release-specific `[blacklist]` entry
+  can't force a release to lose a comparison that never happens.
+  `(Program)`-tagged files are now pulled out unconditionally, the same
+  way `[BIOS]` and proto/beta files already are, and routed to their own
+  `.duplicates/Program/` regardless of what else exists for that title.
+  `--isolate-imports` gets the same exclusion -- a non-NA-region
+  `(Program)` utility isn't a foreign release of a real game, so it
+  shouldn't be swept into `.imports/` just for lacking a `USA`/`World` tag.
 
 ## 1.6.1
 

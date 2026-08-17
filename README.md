@@ -64,6 +64,12 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 - **Routes BIOS files** (anything tagged `[BIOS]`) into `.duplicates/bios/`.
 - **Always routes proto/beta builds** to `.duplicates/Proto-Beta/`, even if
   it's the only copy of that title.
+- **Always routes `(Program)`-tagged files** (test/utility discs like
+  `Sega Channel`, `CDX Pro`, `Sega Sound Tool`) to `.duplicates/Program/`,
+  even if it's the only file under that made-up title — which it usually
+  is, so nothing in `rom_filters.txt` could otherwise touch it (there's no
+  duplicate comparison for a release-specific `[blacklist]` entry to force
+  it to lose).
 - **Cleans up redundant raw disc images** — if a release folder has both a
   `.chd` and leftover `.bin`/`.cue` for the same disc, the raw files move
   to `.duplicates/Redundant-Raw-Disc/` and only the `.chd` is kept.
@@ -149,8 +155,8 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   ungrouped multi-disc set — moved as one unit), or an `--make-m3u`
   playlist (moved together with its hidden disc folder, so the
   playlist's relative disc paths keep working from its new location).
-  BIOS- and proto/beta-tagged entries are left alone, same as the normal
-  scan; `.duplicates/`, `.imports/`, alpha-bucket leftover folders, and
+  BIOS-, proto/beta-, and `(Program)`-tagged entries are left alone, same
+  as the normal scan; `.duplicates/`, `.imports/`, alpha-bucket leftover folders, and
   common non-ROM asset folders some frontends keep alongside the roms
   (`media`, `images`, `screenshots`, `videos`, `manuals`,
   `downloaded_media`) are never treated as titles. Re-running is cheap —
