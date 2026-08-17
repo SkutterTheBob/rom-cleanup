@@ -1212,13 +1212,22 @@ def make_m3u_playlists(roms_dir, apply):
 # a USA-specific tag).
 NA_REGIONS = {"usa", "world"}
 
-IMPORTS_DIR_NAME = "Imports"
+# Dot-prefixed so ES-DE and RetroArch skip it when scanning, the same way
+# ".duplicates" and the "--make-m3u" ".chd" folder are hidden -- isolated
+# imports stay on disk and stay browsable, without showing up as a folder
+# entry in the frontend alongside the games that did get a NA release.
+IMPORTS_DIR_NAME = ".imports"
+
+# The visible name this folder used before it was hidden. A folder left over
+# under the old name is migrated into the current one (see
+# plan_imports_dir_migration) rather than being mistaken for a game title.
+LEGACY_IMPORTS_DIR_NAME = "Imports"
 
 # Common non-ROM asset folders some frontends/collections keep directly
 # alongside the ROM files (e.g. ES-DE-style per-system media). These have
 # no title/tags of their own -- without this exclusion they'd be treated
 # as an untitled release with no recognized region and get swept into
-# Imports/, which would be wrong (and potentially disruptive, since some
+# .imports/, which would be wrong (and potentially disruptive, since some
 # frontends expect this folder at a fixed path relative to the roms).
 NON_TITLE_DIR_NAMES = {
     "media", "images", "image", "screenshots", "screenshot",
@@ -1246,12 +1255,53 @@ def _is_bios_or_proto_beta_tagged(tags):
     return False
 
 
+def plan_imports_dir_migration(roms_dir, reserved=None):
+    """Plan moving everything out of a leftover visible "Imports/" folder
+    (the name this used before it was hidden) into the current ".imports/".
+
+    Each entry is moved as one unit, so a release subfolder or an .m3u
+    playlist's hidden disc folder keeps its structure. Returns
+    (moves, legacy_dir) with legacy_dir set to the old folder's path so it
+    can be removed once emptied, or (empty list, None) when there's nothing
+    to migrate -- including the case where the old name and the new one are
+    the same folder on a case-insensitive filesystem.
+    """
+    legacy_dir = os.path.join(roms_dir, LEGACY_IMPORTS_DIR_NAME)
+    import_dir = os.path.join(roms_dir, IMPORTS_DIR_NAME)
+    if not os.path.isdir(legacy_dir):
+        return [], None
+    if os.path.normcase(os.path.abspath(legacy_dir)) == os.path.normcase(
+            os.path.abspath(import_dir)):
+        return [], None
+
+    reserved = reserved if reserved is not None else set()
+    moves = []
+    for name in sorted(os.listdir(legacy_dir)):
+        src = os.path.join(legacy_dir, name)
+        if name == M3U_HIDDEN_DIR_NAME:
+            # The hidden disc folder has to land at the same relative
+            # position or every migrated playlist's disc paths break. Move
+            # its per-release subfolders individually rather than the folder
+            # itself: shutil.move() onto an existing directory nests inside
+            # it instead of merging, which would bury them a level deeper.
+            for release_name in sorted(os.listdir(src)):
+                moves.append((
+                    os.path.join(src, release_name),
+                    os.path.join(import_dir, name, release_name),
+                ))
+            continue
+        dest = unique_dest_path(import_dir, name, also_avoid=reserved)
+        reserved.add(dest)
+        moves.append((src, dest))
+    return moves, legacy_dir
+
+
 def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_titles=None,
                           whitelist_releases=None):
     """Find every title directly under roms_dir with NO North-American-
     tagged release (no "USA" or "World" tag on ANY of its entries) and
     plan moving every one of that title's entries into
-    <roms_dir>/Imports/, keeping every region/revision of the title
+    <roms_dir>/.imports/, keeping every region/revision of the title
     together as a group.
 
     Only considers roms_dir's own direct children: a plain ROM file, an
@@ -1260,11 +1310,11 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     playlist's relative disc paths valid), or a whole subfolder (treated
     as one release unit, e.g. a multi-disc release not yet grouped via
     --make-m3u). BIOS- and proto/beta-tagged entries are left alone, same
-    as the normal scan. .duplicates/, Imports/, the M3U hidden ".chd/"
+    as the normal scan. .duplicates/, .imports/, the M3U hidden ".chd/"
     folder, alpha-bucket leftover folders, and common non-ROM asset
     folders some frontends keep alongside the roms (see
     NON_TITLE_DIR_NAMES, e.g. "media", "images", "screenshots") are never
-    themselves treated as titles. Entries already inside Imports/ are
+    themselves treated as titles. Entries already inside .imports/ are
     invisible to this pass (never reconsidered), making re-runs cheap.
 
     blacklist_titles/whitelist_titles: the whole-title dicts from
@@ -1289,9 +1339,9 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     Returns (to_move, kept_titles, import_titles, blocked, filtered_out):
         to_move:       [(current_path, final_path), ...]
         kept_titles:   sorted display titles staying in roms_dir
-        import_titles: sorted display titles moving to Imports/
+        import_titles: sorted display titles moving to .imports/
         blocked:       [(title, reason), ...] for an .m3u release whose
-                        target already exists in Imports/ -- skipped
+                        target already exists in .imports/ -- skipped
                         rather than risking a renamed, desynced pair
         filtered_out:  count of entries skipped due to the filter file
     """
@@ -1306,8 +1356,8 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
         full = os.path.join(roms_dir, name)
         if os.path.abspath(full) == dup_dir_abs:
             continue
-        if name.lower() == IMPORTS_DIR_NAME.lower():
-            continue
+        if name.lower() in (IMPORTS_DIR_NAME.lower(), LEGACY_IMPORTS_DIR_NAME.lower()):
+            continue  # the legacy one is migrated, not treated as a title
         if name == M3U_HIDDEN_DIR_NAME:
             continue  # handled together with its .m3u file, not on its own
 
@@ -1390,7 +1440,10 @@ def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
                      whitelist_titles=None, whitelist_releases=None, filter_file_used=None):
     """Print (and, if apply, perform) the plan from plan_isolate_imports:
     move every title with no North-American release into
-    <roms_dir>/Imports/. Returns (moved_titles, kept_titles).
+    <roms_dir>/.imports/. Returns (moved_titles, kept_titles).
+
+    A leftover visible "Imports/" folder from before this one was hidden is
+    migrated into ".imports/" first (see plan_imports_dir_migration).
 
     blacklist_titles/whitelist_titles/whitelist_releases: passed straight
     through to plan_isolate_imports -- see there for how rom_filters.txt
@@ -1400,12 +1453,24 @@ def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
         roms_dir, dup_dir, blacklist_titles=blacklist_titles,
         whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases)
 
+    migration_moves, legacy_dir = plan_imports_dir_migration(roms_dir)
+
     if filter_file_used:
         print("Filter file used: {0}".format(filter_file_used))
         if filtered_out:
             print("Entries skipped by filter: {0}".format(filtered_out))
 
-    if not import_titles and not blocked:
+    if migration_moves:
+        print("\nMigrating {0} entr{1} from the old visible {2}/ folder into "
+              "{3}/ (hidden, so ES-DE and RetroArch skip it):".format(
+                  len(migration_moves), "y" if len(migration_moves) == 1 else "ies",
+                  LEGACY_IMPORTS_DIR_NAME, IMPORTS_DIR_NAME))
+        for src, _dest in migration_moves[:10]:
+            print("  [MIGRATE] {0}".format(os.path.relpath(src, roms_dir)))
+        if len(migration_moves) > 10:
+            print("  ... and {0} more".format(len(migration_moves) - 10))
+
+    if not import_titles and not blocked and not migration_moves:
         print("No import-only titles found under {0} -- nothing to isolate.".format(roms_dir))
         return 0, len(kept_titles)
 
@@ -1420,17 +1485,21 @@ def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
 
     if not apply:
         print("\nDRY RUN -- would move {0} file(s)/folder(s) for {1} title(s) into "
-              "{2}/ ({3} title(s) kept in {4}{5}). Re-run with --apply to do it.".format(
+              "{2}/ ({3} title(s) kept in {4}{5}{6}). Re-run with --apply to do it.".format(
                   len(to_move), len(import_titles), IMPORTS_DIR_NAME, len(kept_titles),
                   os.path.basename(roms_dir) or roms_dir,
-                  "; {0} blocked".format(len(blocked)) if blocked else ""))
+                  "; {0} blocked".format(len(blocked)) if blocked else "",
+                  "; {0} migrated from {1}/".format(
+                      len(migration_moves), LEGACY_IMPORTS_DIR_NAME) if migration_moves else ""))
         return len(import_titles), len(kept_titles)
 
     import_dir = os.path.join(roms_dir, IMPORTS_DIR_NAME)
     os.makedirs(import_dir, exist_ok=True)
     moved = 0
     errors = 0
-    for src, dest in to_move:
+    # Migration first: the old folder has to be emptied before anything new
+    # lands, so a same-named title can't collide with a migrated entry.
+    for src, dest in migration_moves + to_move:
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.move(src, dest)
@@ -1440,10 +1509,14 @@ def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
             print("  ERROR moving {0} -> {1}: {2}".format(src, dest, e), file=sys.stderr)
 
     print("\nMoved {0}/{1} file(s)/folder(s) for {2} title(s) into {3}/{4}.".format(
-        moved, len(to_move), len(import_titles), IMPORTS_DIR_NAME,
+        moved, len(migration_moves) + len(to_move), len(import_titles), IMPORTS_DIR_NAME,
         "; {0} error(s)".format(errors) if errors else ""))
 
-    removed_dirs = remove_now_empty_dirs(roms_dir, {os.path.join(roms_dir, M3U_HIDDEN_DIR_NAME)})
+    cleanup_dirs = {os.path.join(roms_dir, M3U_HIDDEN_DIR_NAME)}
+    if legacy_dir:
+        cleanup_dirs.add(os.path.join(legacy_dir, M3U_HIDDEN_DIR_NAME))
+        cleanup_dirs.add(legacy_dir)
+    removed_dirs = remove_now_empty_dirs(roms_dir, cleanup_dirs)
     if removed_dirs:
         print("\nRemoved {0} now-empty folder(s):".format(len(removed_dirs)))
         for d in sorted(removed_dirs):
@@ -1973,7 +2046,8 @@ def main():
     parser.add_argument("--isolate-imports", action="store_true",
                          help="Move every title with NO North-American-tagged "
                               "release (no \"USA\" or \"World\" tag on any of its "
-                              "entries) into roms_dir/Imports/, keeping every "
+                              "entries) into roms_dir/.imports/ -- a hidden folder, so "
+                              "ES-DE and RetroArch skip it -- keeping every "
                               "region/revision of that title together. Titles with "
                               "at least one USA/World release are left in roms_dir. "
                               "Considers roms_dir's direct children only: ROM files, "
@@ -1987,7 +2061,9 @@ def main():
                               "keeps it too; a release-specific blacklist entry does "
                               "NOT apply here (it means \"lose the duplicate "
                               "comparison\", not \"protect from being moved\"). "
-                              "Respects --apply (dry-run preview by "
+                              "A leftover visible \"Imports/\" folder from before "
+                              "this one was hidden is migrated into \".imports/\" "
+                              "automatically. Respects --apply (dry-run preview by "
                               "default). Runs standalone.")
     args = parser.parse_args()
 

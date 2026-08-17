@@ -4,8 +4,12 @@
 
 - Added `--isolate-imports`: moves every title with no `USA`- or
   `World`-tagged release (both long-standing conventions for including
-  English content) into `<roms_dir>/Imports/`, keeping every region/
-  revision of that title together as a group; a title with even one
+  English content) into `<roms_dir>/.imports/` -- dot-prefixed so ES-DE
+  and RetroArch skip it when scanning, the same convention `.duplicates/`
+  and `--make-m3u`'s `.chd/` folder already use, so isolated imports stay
+  on disk and stay browsable without showing up as a folder entry in the
+  frontend alongside the games that did get a NA release. Keeps every
+  region/revision of that title together as a group; a title with even one
   NA-tagged release stays in `roms_dir` untouched. No external list to
   fetch -- reuses the ROM set's own filename tags, the same way the rest
   of the tool reads them. Considers `roms_dir`'s direct children only: a
@@ -14,13 +18,18 @@
   together with its hidden disc folder, keeping the playlist's relative
   disc paths valid from its new location -- blocked with a warning
   instead of silently renamed if the target already exists in
-  `Imports/`, to avoid desyncing the pair). BIOS- and proto/beta-tagged
+  `.imports/`, to avoid desyncing the pair). BIOS- and proto/beta-tagged
   entries are left alone, same as the normal scan; `.duplicates/`,
-  `Imports/`, alpha-bucket leftover folders, and common non-ROM asset
+  `.imports/`, alpha-bucket leftover folders, and common non-ROM asset
   folders some frontends keep alongside the roms (`media`, `images`,
   `screenshots`, `videos`, `manuals`, `downloaded_media`) are never
-  treated as titles. Anything already inside `Imports/` is invisible to this pass
-  on re-runs, so it's cheap to run repeatedly. Respects `rom_filters.txt`
+  treated as titles. Anything already inside `.imports/` is invisible to
+  this pass on re-runs, so it's cheap to run repeatedly. A leftover
+  visible `Imports/` folder from an earlier build is migrated into
+  `.imports/` automatically -- its entries moved across (the `.chd/`
+  hidden disc folder merged per release, so multi-disc playlists keep
+  pointing at their discs) and the emptied folder removed.
+  Respects `rom_filters.txt`
   (`--filter-file`): a whole-title `[blacklist]` entry always wins and
   keeps a title in place; a whole-title `[whitelist]` entry restricts
   scope to only whitelisted titles; a release-specific `[whitelist]`

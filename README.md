@@ -139,7 +139,8 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 - **Isolates titles never officially released in North America**
   (`--isolate-imports`) — moves every title with no `USA`- or
   `World`-tagged release (both long-standing conventions for including
-  English content) into `<roms_dir>/Imports/`, keeping every region/
+  English content) into `<roms_dir>/.imports/` — dot-prefixed so ES-DE
+  and RetroArch skip it when scanning — keeping every region/
   revision of that title together as a group; a title with even one
   NA-tagged release stays in `roms_dir` untouched. No external list to
   fetch — the ROM set's own filename tags already encode this, the same
@@ -149,12 +150,14 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   playlist (moved together with its hidden disc folder, so the
   playlist's relative disc paths keep working from its new location).
   BIOS- and proto/beta-tagged entries are left alone, same as the normal
-  scan; `.duplicates/`, `Imports/`, alpha-bucket leftover folders, and
+  scan; `.duplicates/`, `.imports/`, alpha-bucket leftover folders, and
   common non-ROM asset folders some frontends keep alongside the roms
   (`media`, `images`, `screenshots`, `videos`, `manuals`,
   `downloaded_media`) are never treated as titles. Re-running is cheap —
   anything already inside
-  `Imports/` is invisible to this pass, never reconsidered. Respects
+  `.imports/` is invisible to this pass, never reconsidered. A leftover
+  visible `Imports/` folder from before this one was hidden is migrated
+  into `.imports/` automatically. Respects
   `rom_filters.txt` (see below): a whole-title `[blacklist]` entry always
   wins and keeps that title in place; a whole-title `[whitelist]` entry
   restricts scope to only whitelisted titles; a release-specific
@@ -185,7 +188,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--convert-to-chd` | Convert every `.cue` found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
 | `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
 | `--make-m3u` | Group disc-tagged `.chd` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden `.chd/` folder |
-| `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/Imports/`, keeping every region/revision of that title together |
+| `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/.imports/` (hidden from ES-DE/RetroArch), keeping every region/revision of that title together |
 | `--version` | Print the script version and exit |
 
 ## Installing chdman (for `--convert-to-chd`)
@@ -276,12 +279,12 @@ your-roms-folder/
 ```
 
 After `--isolate-imports --apply`, titles with no North American release
-move together into `Imports/`:
+move together into `.imports/`:
 
 ```
 your-roms-folder/
 ├── Super Game (USA).zip           # has a USA release -- stays put
-└── Imports/
+└── .imports/                      # hidden -- frontends skip it
     ├── SaGa 2 (Japan).zip
     └── SaGa 2 (Japan) (En).zip
 ```

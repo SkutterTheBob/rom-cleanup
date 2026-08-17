@@ -483,7 +483,7 @@ def test_plan_isolate_imports_moves_import_only_title(tmp_path):
     assert imports == ["SaGa 2"]
     assert len(to_move) == 2
     dest_dirs = {os.path.dirname(dest) for _, dest in to_move}
-    assert dest_dirs == {str(tmp_path / "Imports")}
+    assert dest_dirs == {str(tmp_path / ".imports")}
 
 
 def test_plan_isolate_imports_mixed_title_stays_if_any_release_is_na(tmp_path):
@@ -513,7 +513,7 @@ def test_plan_isolate_imports_ignores_bios_and_proto_beta(tmp_path):
 
 def test_plan_isolate_imports_ignores_duplicates_and_imports_dirs(tmp_path):
     touch(tmp_path / ".duplicates" / "Whatever (USA).zip")
-    touch(tmp_path / "Imports" / "Already There (Japan).zip")
+    touch(tmp_path / ".imports" / "Already There (Japan).zip")
 
     to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
 
@@ -536,7 +536,7 @@ def test_plan_isolate_imports_ignores_non_title_asset_folders(tmp_path):
     """Regression test for the reported bug: a "media" folder (common in
     ES-DE/frontend setups for box art, screenshots, videos alongside the
     roms) has no tags of its own and must not be treated as an untitled
-    release with no NA tag and swept into Imports/.
+    release with no NA tag and swept into .imports/.
     """
     touch(tmp_path / "Super Game (USA).zip")
     touch(tmp_path / "media" / "screenshots" / "super game.png")
@@ -561,7 +561,7 @@ def test_plan_isolate_imports_moves_whole_release_subfolder_as_one_unit(tmp_path
     assert len(to_move) == 1
     src, dest = to_move[0]
     assert src == str(release_dir)
-    assert dest == str(tmp_path / "Imports" / "Old Style CD (Japan)")
+    assert dest == str(tmp_path / ".imports" / "Old Style CD (Japan)")
 
 
 def test_plan_isolate_imports_moves_m3u_with_its_hidden_disc_folder(tmp_path):
@@ -580,8 +580,8 @@ def test_plan_isolate_imports_moves_m3u_with_its_hidden_disc_folder(tmp_path):
     assert str(tmp_path / "SaGa CD (Japan).m3u") in srcs
     assert str(hidden_dir) in srcs
     dests = {dest for _, dest in to_move}
-    assert str(tmp_path / "Imports" / "SaGa CD (Japan).m3u") in dests
-    assert str(tmp_path / "Imports" / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)") in dests
+    assert str(tmp_path / ".imports" / "SaGa CD (Japan).m3u") in dests
+    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)") in dests
 
 
 def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path):
@@ -593,7 +593,7 @@ def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path)
     touch(hidden_dir / "SaGa CD (Japan) (Disc 1).chd")
     (tmp_path / "SaGa CD (Japan).m3u").write_text(
         ".chd/SaGa CD (Japan)/SaGa CD (Japan) (Disc 1).chd\n", encoding="utf-8")
-    touch(tmp_path / "Imports" / "SaGa CD (Japan).m3u")  # pre-existing collision
+    touch(tmp_path / ".imports" / "SaGa CD (Japan).m3u")  # pre-existing collision
 
     to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
 
@@ -605,7 +605,7 @@ def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path)
 def test_plan_isolate_imports_blacklisted_title_is_never_moved(tmp_path):
     """Regression test: a whole-title blacklist entry means "never touch
     this game at all", same as everywhere else in the tool -- it must not
-    be moved to Imports/ even though it has no NA release.
+    be moved to .imports/ even though it has no NA release.
     """
     touch(tmp_path / "SaGa 2 (Japan).zip")
     touch(tmp_path / "Protected Import (Japan).zip")
@@ -2346,7 +2346,7 @@ def test_isolate_imports_dry_run_does_not_move_anything(tmp_path):
 
     assert "DRY RUN" in result.stdout
     assert (tmp_path / "SaGa 2 (Japan).zip").exists()
-    assert not (tmp_path / "Imports").exists()
+    assert not (tmp_path / ".imports").exists()
 
 
 def test_isolate_imports_apply_moves_import_only_titles_together(tmp_path):
@@ -2356,8 +2356,8 @@ def test_isolate_imports_apply_moves_import_only_titles_together(tmp_path):
 
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
-    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
-    assert (tmp_path / "Imports" / "SaGa 2 (Japan) (En).zip").exists()
+    assert (tmp_path / ".imports" / "SaGa 2 (Japan).zip").exists()
+    assert (tmp_path / ".imports" / "SaGa 2 (Japan) (En).zip").exists()
     assert (tmp_path / "Super Game (USA).zip").exists()
     assert "Moved 2/2" in result.stdout
 
@@ -2368,7 +2368,7 @@ def test_isolate_imports_world_release_counts_as_na(tmp_path):
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert (tmp_path / "World Racer (World).zip").exists()
-    assert not (tmp_path / "Imports").exists()
+    assert not (tmp_path / ".imports").exists()
     assert "No import-only titles found" in result.stdout
 
 
@@ -2380,7 +2380,7 @@ def test_isolate_imports_leaves_bios_and_proto_beta_alone(tmp_path):
 
     assert (tmp_path / "PSX [BIOS].bin").exists()
     assert (tmp_path / "Unreleased (Japan) (Proto).zip").exists()
-    assert not (tmp_path / "Imports").exists()
+    assert not (tmp_path / ".imports").exists()
 
 
 def test_isolate_imports_moves_whole_multi_file_release_folder(tmp_path):
@@ -2390,14 +2390,99 @@ def test_isolate_imports_moves_whole_multi_file_release_folder(tmp_path):
 
     run_script(tmp_path, "--isolate-imports", "--apply")
 
-    assert (tmp_path / "Imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).cue").exists()
-    assert (tmp_path / "Imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).bin").exists()
+    assert (tmp_path / ".imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).cue").exists()
+    assert (tmp_path / ".imports" / "Old Style CD (Japan)" / "Old Style CD (Japan).bin").exists()
     assert not release_dir.exists()
+
+
+def test_plan_imports_dir_migration_nothing_to_do_without_legacy_folder(tmp_path):
+    (tmp_path / ".imports").mkdir()
+    moves, legacy = rc.plan_imports_dir_migration(str(tmp_path))
+    assert moves == []
+    assert legacy is None
+
+
+def test_plan_imports_dir_migration_moves_legacy_entries(tmp_path):
+    touch(tmp_path / "Imports" / "Old One (Japan).zip")
+    touch(tmp_path / "Imports" / "Old Two (Japan).zip")
+
+    moves, legacy = rc.plan_imports_dir_migration(str(tmp_path))
+
+    assert legacy == str(tmp_path / "Imports")
+    assert sorted(d for _s, d in moves) == [
+        str(tmp_path / ".imports" / "Old One (Japan).zip"),
+        str(tmp_path / ".imports" / "Old Two (Japan).zip"),
+    ]
+
+
+def test_plan_imports_dir_migration_descends_into_the_m3u_hidden_folder(tmp_path):
+    """Moving the .chd folder itself onto an existing one would nest it a
+    level deeper instead of merging, burying the discs the playlists point at.
+    """
+    touch(tmp_path / "Imports" / "CD Game (Japan).m3u")
+    touch(tmp_path / "Imports" / rc.M3U_HIDDEN_DIR_NAME / "CD Game (Japan)"
+          / "CD Game (Japan) (Disc 1).chd")
+
+    moves, _legacy = rc.plan_imports_dir_migration(str(tmp_path))
+
+    dests = [d for _s, d in moves]
+    assert str(tmp_path / ".imports" / "CD Game (Japan).m3u") in dests
+    # the per-release folder moves, not the shared ".chd" folder itself
+    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME / "CD Game (Japan)") in dests
+    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME) not in dests
+
+
+def test_plan_imports_dir_migration_avoids_collision_with_existing_entry(tmp_path):
+    touch(tmp_path / "Imports" / "Dup Name (Japan).zip")
+    touch(tmp_path / ".imports" / "Dup Name (Japan).zip")
+
+    moves, _legacy = rc.plan_imports_dir_migration(str(tmp_path))
+
+    assert [d for _s, d in moves] == [
+        str(tmp_path / ".imports" / "Dup Name (Japan) (1).zip")]
+
+
+def test_isolate_imports_migrates_legacy_folder_and_removes_it(tmp_path):
+    (tmp_path / "Imports").mkdir()
+    (tmp_path / "Imports" / "Old Import (Japan).zip").write_bytes(b"legacy-payload")
+    touch(tmp_path / "New Import (Japan).zip")
+    touch(tmp_path / "Keeper (USA).zip")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    # legacy folder emptied and removed, its contents preserved
+    assert not (tmp_path / "Imports").exists()
+    assert (tmp_path / ".imports" / "Old Import (Japan).zip").read_bytes() == b"legacy-payload"
+    # and the new pass still ran in the same invocation
+    assert (tmp_path / ".imports" / "New Import (Japan).zip").exists()
+    assert (tmp_path / "Keeper (USA).zip").exists()
+
+
+def test_isolate_imports_does_not_treat_legacy_folder_as_a_title(tmp_path):
+    """Without the legacy skip, "Imports" parses as an untitled release with
+    no NA tag and gets swept into .imports/Imports/ as if it were a game.
+    """
+    touch(tmp_path / "Imports" / "Old Import (Japan).zip")
+
+    run_script(tmp_path, "--isolate-imports", "--apply")
+
+    assert not (tmp_path / ".imports" / "Imports").exists()
+    assert (tmp_path / ".imports" / "Old Import (Japan).zip").exists()
+
+
+def test_isolate_imports_migration_dry_run_moves_nothing(tmp_path):
+    touch(tmp_path / "Imports" / "Old Import (Japan).zip")
+
+    result = run_script(tmp_path, "--isolate-imports")
+
+    assert (tmp_path / "Imports" / "Old Import (Japan).zip").exists()
+    assert not (tmp_path / ".imports").exists()
+    assert "MIGRATE" in result.stdout
 
 
 def test_isolate_imports_leaves_media_folder_alone(tmp_path):
     """End-to-end regression test for the reported bug: a "media" asset
-    folder alongside the roms must never be swept into Imports/.
+    folder alongside the roms must never be swept into .imports/.
     """
     touch(tmp_path / "Super Game (USA).zip")
     touch(tmp_path / "media" / "screenshots" / "super game.png")
@@ -2405,7 +2490,7 @@ def test_isolate_imports_leaves_media_folder_alone(tmp_path):
     run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert (tmp_path / "media" / "screenshots" / "super game.png").exists()
-    assert not (tmp_path / "Imports").exists()
+    assert not (tmp_path / ".imports").exists()
 
 
 def test_isolate_imports_rerun_is_idempotent(tmp_path):
@@ -2415,7 +2500,7 @@ def test_isolate_imports_rerun_is_idempotent(tmp_path):
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert "No import-only titles found" in result.stdout
-    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+    assert (tmp_path / ".imports" / "SaGa 2 (Japan).zip").exists()
 
 
 def test_isolate_imports_moves_m3u_and_hidden_disc_folder_with_working_playlist(tmp_path):
@@ -2430,7 +2515,7 @@ def test_isolate_imports_moves_m3u_and_hidden_disc_folder_with_working_playlist(
 
     run_script(tmp_path, "--isolate-imports", "--apply")
 
-    m3u_path = tmp_path / "Imports" / "SaGa CD (Japan).m3u"
+    m3u_path = tmp_path / ".imports" / "SaGa CD (Japan).m3u"
     assert m3u_path.exists()
     content = m3u_path.read_text(encoding="utf-8")
     for line in content.splitlines():
@@ -2454,7 +2539,7 @@ def test_isolate_imports_respects_blacklist(tmp_path):
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert (tmp_path / "Protected Import (Japan).zip").exists()
-    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+    assert (tmp_path / ".imports" / "SaGa 2 (Japan).zip").exists()
     assert "Filter file used" in result.stdout
 
 
@@ -2466,7 +2551,7 @@ def test_isolate_imports_respects_whitelist(tmp_path):
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert (tmp_path / "Another Import (Japan).zip").exists()
-    assert (tmp_path / "Imports" / "SaGa 2 (Japan).zip").exists()
+    assert (tmp_path / ".imports" / "SaGa 2 (Japan).zip").exists()
 
 
 def test_isolate_imports_respects_release_specific_whitelist_pin(tmp_path):
@@ -2482,7 +2567,7 @@ def test_isolate_imports_respects_release_specific_whitelist_pin(tmp_path):
     result = run_script(tmp_path, "--isolate-imports", "--apply")
 
     assert (tmp_path / "Streets of Rage II (Japan, Europe) (En,Ja).7z").exists()
-    assert not (tmp_path / "Imports").exists()
+    assert not (tmp_path / ".imports").exists()
     assert "No import-only titles found" in result.stdout
 
 
