@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.7.0
+
+- Added `--isolate-imports`: moves every title with no `USA`- or
+  `World`-tagged release (both long-standing conventions for including
+  English content) into `<roms_dir>/.imports/` -- dot-prefixed so ES-DE
+  and RetroArch skip it when scanning, the same convention `.duplicates/`
+  and `--make-m3u`'s `.chd/` folder already use, so isolated imports stay
+  on disk and stay browsable without showing up as a folder entry in the
+  frontend alongside the games that did get a NA release. Keeps every
+  region/revision of that title together as a group; a title with even one
+  NA-tagged release stays in `roms_dir` untouched. No external list to
+  fetch -- reuses the ROM set's own filename tags, the same way the rest
+  of the tool reads them. Considers `roms_dir`'s direct children only: a
+  plain ROM file, a whole release subfolder (e.g. an ungrouped
+  multi-disc set, moved as one unit), or a `--make-m3u` playlist (moved
+  together with its hidden disc folder, keeping the playlist's relative
+  disc paths valid from its new location -- blocked with a warning
+  instead of silently renamed if the target already exists in
+  `.imports/`, to avoid desyncing the pair). BIOS- and proto/beta-tagged
+  entries are left alone, same as the normal scan; `.duplicates/`,
+  `.imports/`, alpha-bucket leftover folders, and common non-ROM asset
+  folders some frontends keep alongside the roms (`media`, `images`,
+  `screenshots`, `videos`, `manuals`, `downloaded_media`) are never
+  treated as titles. Anything already inside `.imports/` is invisible to
+  this pass on re-runs, so it's cheap to run repeatedly. A leftover
+  visible `Imports/` folder from an earlier build is migrated into
+  `.imports/` automatically -- its entries moved across (the `.chd/`
+  hidden disc folder merged per release, so multi-disc playlists keep
+  pointing at their discs) and the emptied folder removed.
+  Respects `rom_filters.txt`
+  (`--filter-file`): a whole-title `[blacklist]` entry always wins and
+  keeps a title in place; a whole-title `[whitelist]` entry restricts
+  scope to only whitelisted titles; a release-specific `[whitelist]`
+  entry (pinning one exact release) also keeps that title in place, even
+  outside an active whole-title whitelist's scope -- a release-specific
+  `[blacklist]` entry does NOT apply here, since its meaning ("force this
+  release to lose the duplicate comparison") doesn't translate to
+  "protect it from being moved". Respects `--apply` (dry-run preview by
+  default) and runs standalone.
+- Fixed `parse_filter_line()` (used by `rom_filters.txt` everywhere in
+  the tool) to tolerate a trailing file extension, e.g. pasting
+  `Streets of Rage II (Japan, Europe) (En,Ja).7z` straight out of a
+  directory listing now matches correctly -- the extension used to get
+  folded into the parsed title text, silently producing a `title_key`
+  that never matched the actual file's.
+- Fixed: a `(Program)` tagged file (e.g. `Sega Channel (USA)
+  (General Instrument) (Program).7z`, `CDX Pro`, `Sega Sound Tool`) is a
+  test/utility disc, not a game -- and it's typically the only file under
+  its own made-up title, so nothing ever competes with it in a duplicate
+  comparison. It used to stay in `roms_dir` forever no matter what
+  `rom_filters.txt` said: the "never lose the only copy of a title" guard
+  exists to protect real games, and a release-specific `[blacklist]` entry
+  can't force a release to lose a comparison that never happens.
+  `(Program)`-tagged files are now pulled out unconditionally, the same
+  way `[BIOS]` and proto/beta files already are, and routed to their own
+  `.duplicates/Program/` regardless of what else exists for that title.
+  `--isolate-imports` gets the same exclusion -- a non-NA-region
+  `(Program)` utility isn't a foreign release of a real game, so it
+  shouldn't be swept into `.imports/` just for lacking a `USA`/`World` tag.
+- Added a `[reject]` section to `rom_filters.txt`, for the same "only copy
+  of its title, never enters a duplicate comparison" problem `(Program)`
+  above solves for utility discs -- but for a release with no recognizable
+  tag of its own, e.g. a one-off compilation like `Arcade Legends Sega
+  Mega Drive (World)`. A release-specific `[blacklist]` entry can't do
+  anything here (there's no competing release for it to lose a comparison
+  to), so `[reject]` always routes a matching whole title or specific
+  release straight to `.duplicates/Rejected/`, no comparison needed at
+  all. Checked first in the scan, ahead of `[blacklist]`/`[whitelist]`
+  scoping -- it's the most explicit signal available ("I know what this
+  is, get it out"), so it always wins for that title.
+  `--isolate-imports` treats a whole-title `[reject]` entry the same as
+  `[blacklist]`: left in place rather than swept into `.imports/`, since
+  it's headed for `.duplicates/Rejected/` via the normal scan instead.
+
 ## 1.6.1
 
 - Fixed a data-loss bug: two files with the same name in different
