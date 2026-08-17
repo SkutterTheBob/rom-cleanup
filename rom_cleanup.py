@@ -37,9 +37,9 @@ import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -1176,6 +1176,369 @@ def find_release_filter_matches(title_key, release_key, release_entries):
     ]
 
 
+# ---- the normal duplicate scan ------------------------------------------
+
+# Subfolders of dup_dir that files get routed into by category. Titles that
+# lost the duplicate comparison go straight into dup_dir itself.
+BIOS_SUBDIR = "bios"
+PROTO_BETA_SUBDIR = "Proto-Beta"
+REDUNDANT_DISC_SUBDIR = "Redundant-Raw-Disc"
+
+
+# What the scan decided about one title.
+#   releases:        {release_key: [(path, tags), ...]} -- every release of
+#                    this title found on disk
+#   keeper_key:      the release_key staying in roms_dir
+#   dupe_keys:       release_keys routed to .duplicates/
+#   pinned:          True if keeper_key was pinned by a [whitelist] entry
+#                    rather than chosen by scoring
+#   forced_dup_keys: {release_key: [filter_line, ...]} for releases forced
+#                    to lose by a [blacklist] entry
+#   contested:       False for the common case of a title with exactly one
+#                    release and no filter involvement -- nothing was
+#                    decided, so it's only worth printing in verbose mode
+TitleDecision = namedtuple("TitleDecision", [
+    "title_key", "releases", "keeper_key", "dupe_keys", "pinned",
+    "forced_dup_keys", "contested",
+])
+
+
+# Everything the normal scan worked out, before anything is printed or moved.
+# Each *_moves list is [(src, dest), ...]; destinations are deduplicated
+# against every other planned move, so two identically-named files from
+# different folders can never be planned onto the same destination path.
+ScanPlan = namedtuple("ScanPlan", [
+    "decisions", "dup_moves", "bios_moves", "proto_beta_moves",
+    "redundant_moves", "skipped", "filtered_out", "blacklist_hits",
+    "whitelist_hits", "pin_hits", "force_dup_hits", "warnings",
+    "total_titles", "total_releases", "kept_files", "dup_files",
+])
+
+
+def all_planned_moves(plan):
+    """Every (src, dest) pair in a ScanPlan, in the order they're reported."""
+    return (list(plan.dup_moves) + list(plan.bios_moves)
+            + list(plan.proto_beta_moves) + list(plan.redundant_moves))
+
+
+def _plan_move(src, dest_dir, reserved):
+    """Plan moving src into dest_dir, claiming the destination so no later
+    move in this same run can be planned onto it too.
+
+    The reservation matters because nothing has been moved yet at planning
+    time: unique_dest_path()'s on-disk existence check alone would hand the
+    same free destination to two different sources with the same basename
+    (e.g. the same release present in two subfolders), and the second
+    shutil.move() would silently overwrite the first.
+    """
+    dest = unique_dest_path(dest_dir, os.path.basename(src), also_avoid=reserved)
+    reserved.add(dest)
+    return (src, dest)
+
+
+def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles):
+    """Walk roms_dir and group every recognized ROM file by title, then by
+    release within that title.
+
+    A release_key groups together files that are pieces of the SAME release
+    (e.g. a .cue plus all its .bin tracks, or a multi-disc set) by ignoring
+    track/disc-number tags. Different release_keys under the same title are
+    what get treated as real duplicates (different region/rev/etc).
+
+    Files tagged [BIOS] or proto/beta are pulled out here rather than being
+    compared as duplicates -- they're routed to their own dup_dir subfolder
+    regardless of what else exists for that title.
+
+    Returns (titles, bios_files, proto_beta_files, skipped, filtered_out,
+    blacklist_hits, whitelist_hits), where titles is
+    {title_key: {release_key: [(path, tags), ...]}}.
+    """
+    titles = defaultdict(lambda: defaultdict(list))
+    bios_files = []
+    proto_beta_files = []
+    skipped = []
+    filtered_out = 0
+    blacklist_hits = defaultdict(int)   # title_key -> files skipped (title-level)
+    whitelist_hits = defaultdict(int)   # title_key -> files processed (title-level)
+
+    for root, dirs, files in os.walk(roms_dir):
+        # never descend into the duplicates folder itself
+        dirs[:] = [d for d in dirs if os.path.join(root, d) != dup_dir]
+        if os.path.abspath(root) == dup_dir:
+            continue
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            stem, ext = os.path.splitext(fname)
+            if ext.lower() not in extensions:
+                skipped.append(fpath)
+                continue
+            base_title, tags = extract_tags(stem)
+
+            title_key = normalize_title(base_title)
+            if not title_key:
+                title_key = normalize_title(stem)
+
+            if title_key in blacklist_titles:
+                filtered_out += 1
+                blacklist_hits[title_key] += 1
+                continue
+            if whitelist_titles and title_key not in whitelist_titles:
+                filtered_out += 1
+                continue
+            if whitelist_titles and title_key in whitelist_titles:
+                whitelist_hits[title_key] += 1
+
+            if any(is_proto_beta_tag(t) for t in tags):
+                proto_beta_files.append(fpath)
+                continue
+
+            if any(t.strip().lower() == "bios" for t in tags):
+                bios_files.append(fpath)
+                continue
+
+            non_part_tags = tuple(sorted(
+                t.lower() for t in tags if not is_part_tag(t)
+            ))
+            titles[title_key][non_part_tags].append((fpath, tags))
+
+    return (titles, bios_files, proto_beta_files, skipped, filtered_out,
+            blacklist_hits, whitelist_hits)
+
+
+def split_redundant_raw_disc(titles):
+    """If a single release contains BOTH a .chd and raw disc-image files
+    (.bin/.cue/.iso/etc) for the same disc, the raw files are leftovers from
+    a conversion. Drop them from the release (so it's compared on its .chd
+    alone) and return them for routing to Redundant-Raw-Disc/.
+
+    Mutates titles in place. Returns the list of redundant file paths.
+    """
+    redundant_disc_files = []
+    for title_key, releases in titles.items():
+        for release_key, file_list in list(releases.items()):
+            exts = {os.path.splitext(f)[1].lower() for f, _ in file_list}
+            if ".chd" in exts and (exts & RAW_DISC_EXTENSIONS):
+                keep_list = [(f, t) for f, t in file_list
+                             if os.path.splitext(f)[1].lower() == ".chd"]
+                raw_list = [(f, t) for f, t in file_list
+                            if os.path.splitext(f)[1].lower() != ".chd"]
+                releases[release_key] = keep_list
+                redundant_disc_files.extend(f for f, t in raw_list)
+    return redundant_disc_files
+
+
+def decide_title_keeper(title_key, releases, region_priority,
+                         whitelist_releases=None, blacklist_releases=None,
+                         warnings=None):
+    """Work out which release of one title stays in place and which ones are
+    duplicates. Returns a TitleDecision.
+
+    A release-specific [whitelist] entry pins that exact release as the
+    keeper, overriding scoring entirely. A release-specific [blacklist]
+    entry forces that release to lose even if it would otherwise win --
+    unless every release of the title is blacklisted, in which case scoring
+    runs normally anyway so the game isn't lost outright (flagged via
+    warnings).
+
+    Otherwise the keeper is the lowest-scoring release per score_release().
+
+    warnings: optional list, appended to rather than printed, so this stays
+    usable as a pure function.
+    """
+    whitelist_releases = whitelist_releases or []
+    blacklist_releases = blacklist_releases or []
+    if warnings is None:
+        warnings = []
+
+    # Check for a manual override: a release-specific whitelist entry pins
+    # that exact release as the forced keeper, overriding scoring.
+    pinned_key = None
+    pinned_lines = []
+    for release_key in releases:
+        matches = find_release_filter_matches(title_key, release_key, whitelist_releases)
+        if matches:
+            pinned_lines.extend(m[2] for m in matches)
+            if pinned_key is not None and pinned_key != release_key:
+                warnings.append(
+                    "multiple [whitelist] entries pin different releases of "
+                    "{0!r} -- using the first one found.".format(title_key))
+                continue
+            pinned_key = release_key
+
+    # Release-specific blacklist entries force that release to always be
+    # treated as a duplicate, even if it would otherwise win.
+    forced_dup_keys = {}  # release_key -> list of matching filter lines
+    for release_key in releases:
+        matches = find_release_filter_matches(title_key, release_key, blacklist_releases)
+        if matches:
+            forced_dup_keys[release_key] = [m[2] for m in matches]
+
+    contested = not (len(releases) == 1 and pinned_key is None and not forced_dup_keys)
+
+    if pinned_key is not None:
+        keeper_key = pinned_key
+    else:
+        candidate_keys = [rk for rk in releases if rk not in forced_dup_keys]
+        if not candidate_keys:
+            # Every release under this title is blacklisted -- rather than
+            # lose the game entirely, fall back to normal scoring so at
+            # least one copy survives, but flag it for the user.
+            warnings.append(
+                "every release of {0!r} is blacklisted -- keeping the "
+                "best-scoring one anyway to avoid losing the game "
+                "entirely.".format(title_key))
+            candidate_keys = list(releases.keys())
+
+        scored = []
+        for release_key in candidate_keys:
+            file_list = releases[release_key]
+            total_size = sum(os.path.getsize(f) for f, _ in file_list)
+            fmt_rank = disc_format_rank(file_list)
+            s = score_release(list(release_key), total_size, region_priority, fmt_rank)
+            scored.append((s, release_key))
+        scored.sort(key=lambda x: x[0])
+        keeper_key = scored[0][1]
+
+    return TitleDecision(
+        title_key=title_key,
+        releases=dict(releases),
+        keeper_key=keeper_key,
+        dupe_keys=[rk for rk in releases if rk != keeper_key],
+        pinned=pinned_key is not None,
+        forced_dup_keys=forced_dup_keys,
+        contested=contested,
+    ), pinned_lines
+
+
+def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None,
+                         whitelist_titles=None, whitelist_releases=None,
+                         blacklist_titles=None, blacklist_releases=None):
+    """Work out the whole normal duplicate scan without printing or moving
+    anything: which release of each title to keep, which to route to
+    .duplicates/, and where every moved file lands.
+
+    This is the planning half of the tool's main operation, split out from
+    main() so the outcome can be inspected (and tested) directly instead of
+    only through the printed output. See print_scan_plan() for the reporting
+    half. Returns a ScanPlan.
+    """
+    region_priority = region_priority or DEFAULT_REGION_PRIORITY
+    extensions = extensions if extensions is not None else ROM_EXTENSIONS_DEFAULT
+    whitelist_titles = whitelist_titles or {}
+    whitelist_releases = whitelist_releases or []
+    blacklist_titles = blacklist_titles or {}
+    blacklist_releases = blacklist_releases or []
+
+    (titles, bios_files, proto_beta_files, skipped, filtered_out,
+     blacklist_hits, whitelist_hits) = scan_rom_files(
+        roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles)
+
+    redundant_disc_files = split_redundant_raw_disc(titles)
+
+    decisions = []
+    dup_moves = []
+    warnings = []
+    pin_hits = defaultdict(int)         # filter line -> files pinned as keeper
+    force_dup_hits = defaultdict(int)   # filter line -> files forced to dup
+    kept_files = 0
+    dup_files = 0
+    total_releases = 0
+    # One shared reservation set across every category: destinations are
+    # claimed as they're planned so nothing can collide with anything else.
+    reserved = set()
+
+    for title_key, releases in sorted(titles.items()):
+        total_releases += len(releases)
+        decision, pinned_lines = decide_title_keeper(
+            title_key, releases, region_priority,
+            whitelist_releases=whitelist_releases,
+            blacklist_releases=blacklist_releases,
+            warnings=warnings)
+        decisions.append(decision)
+
+        keeper_files = decision.releases[decision.keeper_key]
+        kept_files += len(keeper_files)
+
+        if decision.pinned:
+            for line in pinned_lines:
+                pin_hits[line] += len(keeper_files)
+
+        for release_key in decision.dupe_keys:
+            file_list = decision.releases[release_key]
+            for line in decision.forced_dup_keys.get(release_key, []):
+                force_dup_hits[line] += len(file_list)
+            for fpath, tags in sorted(file_list):
+                dup_files += 1
+                dup_moves.append(_plan_move(fpath, dup_dir, reserved))
+
+    bios_moves = [_plan_move(f, os.path.join(dup_dir, BIOS_SUBDIR), reserved)
+                  for f in sorted(bios_files)]
+    proto_beta_moves = [_plan_move(f, os.path.join(dup_dir, PROTO_BETA_SUBDIR), reserved)
+                        for f in sorted(proto_beta_files)]
+    redundant_moves = [_plan_move(f, os.path.join(dup_dir, REDUNDANT_DISC_SUBDIR), reserved)
+                       for f in sorted(redundant_disc_files)]
+
+    return ScanPlan(
+        decisions=decisions,
+        dup_moves=dup_moves,
+        bios_moves=bios_moves,
+        proto_beta_moves=proto_beta_moves,
+        redundant_moves=redundant_moves,
+        skipped=skipped,
+        filtered_out=filtered_out,
+        blacklist_hits=blacklist_hits,
+        whitelist_hits=whitelist_hits,
+        pin_hits=pin_hits,
+        force_dup_hits=force_dup_hits,
+        warnings=warnings,
+        total_titles=len(titles),
+        total_releases=total_releases,
+        kept_files=kept_files,
+        dup_files=dup_files,
+    )
+
+
+def print_scan_plan(plan, roms_dir, verbose=False):
+    """Print the per-title KEEP/DUP breakdown of a ScanPlan, followed by the
+    BIOS, proto/beta and redundant-raw-disc sections. Reporting only -- see
+    plan_duplicate_scan() for the half that decides all of this.
+    """
+    for decision in plan.decisions:
+        if not decision.contested:
+            if verbose:
+                for fpath, tags in decision.releases[decision.keeper_key]:
+                    print("[KEEP] {0}  tags={1}".format(
+                        os.path.relpath(fpath, roms_dir), tags))
+            continue
+
+        print("\nGame: {0!r}  ({1} release(s) found)".format(
+            decision.title_key, len(decision.releases)))
+        print("  [KEEP]{0} release tags={1}".format(
+            "  [PINNED via whitelist]" if decision.pinned else "",
+            list(decision.keeper_key) or ["<none>"]))
+        for fpath, tags in sorted(decision.releases[decision.keeper_key]):
+            print("         {0}".format(os.path.relpath(fpath, roms_dir)))
+
+        for release_key in decision.dupe_keys:
+            print("  [DUP]{0} release tags={1}".format(
+                "  [FORCED via blacklist]" if release_key in decision.forced_dup_keys else "",
+                list(release_key) or ["<none>"]))
+            for fpath, tags in sorted(decision.releases[release_key]):
+                print("         {0}".format(os.path.relpath(fpath, roms_dir)))
+
+    for moves, header, label in (
+        (plan.bios_moves, "BIOS files ({0} found):", "BIOS"),
+        (plan.proto_beta_moves, "Proto/Beta files ({0} found):", "PROTO/BETA"),
+        (plan.redundant_moves,
+         "Redundant raw disc files ({0} found, CHD already present):", "REDUNDANT"),
+    ):
+        if not moves:
+            continue
+        print("\n" + header.format(len(moves)))
+        for src, _dest in moves:
+            print("  [{0}] {1}".format(label, os.path.relpath(src, roms_dir)))
+
+
 def read_scan_marker(roms_dir):
     """Return {'version': ..., 'last_scanned': ...} from a prior run's
     marker file in this roms_dir, or None if it doesn't exist / is unreadable.
@@ -1400,209 +1763,33 @@ def main():
                   "entries -- nothing will be filtered.".format(filter_path),
                   file=sys.stderr)
 
-    # ---- Scan files ----
-    # titles: normalized_title -> { release_key -> [ (fpath, tags), ... ] }
-    # release_key groups together files that are pieces of the SAME
-    # release (e.g. a .cue plus all its .bin tracks, or a multi-disc set)
-    # by ignoring track/disc-number tags. Different release_keys under the
-    # same title are treated as real duplicates (different region/rev/etc).
-    titles = defaultdict(lambda: defaultdict(list))
-    bios_files = []  # files tagged [BIOS] -- routed to duplicates/BIOS/, not compared as dupes
-    proto_beta_files = []  # files tagged proto/beta -- always routed to duplicates
-    skipped = []
-    filtered_out = 0
-    blacklist_hits = defaultdict(int)   # title_key -> count of files skipped (title-level)
-    whitelist_hits = defaultdict(int)   # title_key -> count of files processed (title-level)
-    pin_hits = defaultdict(int)         # filter line text -> count of files pinned as keeper
-    force_dup_hits = defaultdict(int)   # filter line text -> count of files forced to dup
+    plan = plan_duplicate_scan(
+        roms_dir, dup_dir,
+        region_priority=region_priority, extensions=extensions,
+        whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases,
+        blacklist_titles=blacklist_titles, blacklist_releases=blacklist_releases)
 
-    for root, dirs, files in os.walk(roms_dir):
-        # never descend into the duplicates folder itself
-        dirs[:] = [d for d in dirs if os.path.join(root, d) != dup_dir]
-        if os.path.abspath(root) == dup_dir:
-            continue
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            stem, ext = os.path.splitext(fname)
-            if ext.lower() not in extensions:
-                skipped.append(fpath)
-                continue
-            base_title, tags = extract_tags(stem)
+    for warning in plan.warnings:
+        print("\nWarning: {0}".format(warning), file=sys.stderr)
 
-            title_key = normalize_title(base_title)
-            if not title_key:
-                title_key = normalize_title(stem)
+    print_scan_plan(plan, roms_dir, verbose=args.verbose)
 
-            if title_key in blacklist_titles:
-                filtered_out += 1
-                blacklist_hits[title_key] += 1
-                continue
-            if whitelist_titles and title_key not in whitelist_titles:
-                filtered_out += 1
-                continue
-            if whitelist_titles and title_key in whitelist_titles:
-                whitelist_hits[title_key] += 1
-
-            if any(is_proto_beta_tag(t) for t in tags):
-                proto_beta_files.append(fpath)
-                continue
-
-            if any(t.strip().lower() == "bios" for t in tags):
-                bios_files.append(fpath)
-                continue
-
-            non_part_tags = tuple(sorted(
-                t.lower() for t in tags if not is_part_tag(t)
-            ))
-            titles[title_key][non_part_tags].append((fpath, tags))
-
-    # ---- Clean up redundant raw disc images alongside CHDs ----
-    # If a single release contains BOTH a .chd and raw disc-image files
-    # (.bin/.cue/.iso/etc) for the same disc, the raw files are leftovers
-    # from a conversion and get routed to duplicates on their own -- the
-    # release itself is left holding just the .chd for comparison purposes.
-    redundant_disc_files = []
-    for title_key, releases in titles.items():
-        for release_key, file_list in list(releases.items()):
-            exts = {os.path.splitext(f)[1].lower() for f, _ in file_list}
-            if ".chd" in exts and (exts & RAW_DISC_EXTENSIONS):
-                keep_list = [(f, t) for f, t in file_list
-                             if os.path.splitext(f)[1].lower() == ".chd"]
-                raw_list = [(f, t) for f, t in file_list
-                            if os.path.splitext(f)[1].lower() != ".chd"]
-                releases[release_key] = keep_list
-                redundant_disc_files.extend(f for f, t in raw_list)
-
-    # ---- Decide keeper release vs duplicate release per title ----
-    to_move = []   # (src, dest)
-    kept_files = 0
-    dup_files = 0
-    total_releases = 0
-
-    for title_key, releases in sorted(titles.items()):
-        total_releases += len(releases)
-
-        # Check for a manual override: a release-specific whitelist entry
-        # pins that exact release as the forced keeper, overriding scoring.
-        pinned_key = None
-        pinned_lines = []
-        for release_key in releases:
-            matches = find_release_filter_matches(title_key, release_key, whitelist_releases)
-            if matches:
-                pinned_lines.extend(m[2] for m in matches)
-                if pinned_key is not None and pinned_key != release_key:
-                    print("\nWarning: multiple [whitelist] entries pin different "
-                          "releases of {0!r} -- using the first one found.".format(title_key),
-                          file=sys.stderr)
-                    continue
-                pinned_key = release_key
-
-        # Release-specific blacklist entries force that release to always
-        # be treated as a duplicate, even if it would otherwise win.
-        forced_dup_keys = {}  # release_key -> list of matching filter lines
-        for release_key in releases:
-            matches = find_release_filter_matches(title_key, release_key, blacklist_releases)
-            if matches:
-                forced_dup_keys[release_key] = [m[2] for m in matches]
-
-        if len(releases) == 1 and pinned_key is None and not forced_dup_keys:
-            only_release = next(iter(releases.values()))
-            kept_files += len(only_release)
-            if args.verbose:
-                for fpath, tags in only_release:
-                    print("[KEEP] {0}  tags={1}".format(
-                        os.path.relpath(fpath, roms_dir), tags))
-            continue
-
-        pin_note = ""
-        if pinned_key is not None:
-            keeper_key = pinned_key
-            for line in pinned_lines:
-                pin_hits[line] += len(releases[keeper_key])
-            pin_note = "  [PINNED via whitelist]"
-        else:
-            candidate_keys = [rk for rk in releases if rk not in forced_dup_keys]
-            if not candidate_keys:
-                # Every release under this title is blacklisted -- rather than
-                # lose the game entirely, fall back to normal scoring so at
-                # least one copy survives, but flag it for the user.
-                print("\nWarning: every release of {0!r} is blacklisted -- "
-                      "keeping the best-scoring one anyway to avoid losing "
-                      "the game entirely.".format(title_key), file=sys.stderr)
-                candidate_keys = list(releases.keys())
-
-            scored = []
-            for release_key in candidate_keys:
-                file_list = releases[release_key]
-                total_size = sum(os.path.getsize(f) for f, _ in file_list)
-                fmt_rank = disc_format_rank(file_list)
-                s = score_release(list(release_key), total_size, region_priority, fmt_rank)
-                scored.append((s, release_key))
-            scored.sort(key=lambda x: x[0])
-            keeper_key = scored[0][1]
-
-        keeper_files = releases[keeper_key]
-        dupe_keys = [rk for rk in releases if rk != keeper_key]
-
-        kept_files += len(keeper_files)
-        print("\nGame: {0!r}  ({1} release(s) found)".format(title_key, len(releases)))
-        print("  [KEEP]{0} release tags={1}".format(pin_note, list(keeper_key) or ["<none>"]))
-        for fpath, tags in sorted(keeper_files):
-            print("         {0}".format(os.path.relpath(fpath, roms_dir)))
-
-        for release_key in dupe_keys:
-            file_list = releases[release_key]
-            dup_note = ""
-            if release_key in forced_dup_keys:
-                for line in forced_dup_keys[release_key]:
-                    force_dup_hits[line] += len(file_list)
-                dup_note = "  [FORCED via blacklist]"
-            print("  [DUP]{0} release tags={1}".format(dup_note, list(release_key) or ["<none>"]))
-            for fpath, tags in sorted(file_list):
-                dup_files += 1
-                dest = unique_dest_path(dup_dir, os.path.basename(fpath))
-                to_move.append((fpath, dest))
-                print("         {0}".format(os.path.relpath(fpath, roms_dir)))
-
-    bios_dir = os.path.join(dup_dir, "bios")
-    if bios_files:
-        print("\nBIOS files ({0} found):".format(len(bios_files)))
-        for fpath in sorted(bios_files):
-            dest = unique_dest_path(bios_dir, os.path.basename(fpath))
-            to_move.append((fpath, dest))
-            print("  [BIOS] {0}".format(os.path.relpath(fpath, roms_dir)))
-
-    if proto_beta_files:
-        proto_beta_dir = os.path.join(dup_dir, "Proto-Beta")
-        print("\nProto/Beta files ({0} found):".format(len(proto_beta_files)))
-        for fpath in sorted(proto_beta_files):
-            dest = unique_dest_path(proto_beta_dir, os.path.basename(fpath))
-            to_move.append((fpath, dest))
-            print("  [PROTO/BETA] {0}".format(os.path.relpath(fpath, roms_dir)))
-
-    if redundant_disc_files:
-        redundant_dir = os.path.join(dup_dir, "Redundant-Raw-Disc")
-        print("\nRedundant raw disc files ({0} found, CHD already present):".format(
-            len(redundant_disc_files)))
-        for fpath in sorted(redundant_disc_files):
-            dest = unique_dest_path(redundant_dir, os.path.basename(fpath))
-            to_move.append((fpath, dest))
-            print("  [REDUNDANT] {0}".format(os.path.relpath(fpath, roms_dir)))
+    to_move = all_planned_moves(plan)
 
     # ---- Summary ----
     print("\n" + "=" * 60)
-    print("Games (unique titles):     {0}".format(len(titles)))
-    print("Releases found in total:   {0}".format(total_releases))
-    print("Files kept in place:       {0}".format(kept_files))
-    print("Files marked as dupes:     {0}".format(dup_files))
-    print("BIOS files set aside:      {0}".format(len(bios_files)))
-    print("Proto/Beta files set aside:{0}".format(len(proto_beta_files)))
-    print("Redundant raw disc files:  {0}".format(len(redundant_disc_files)))
+    print("Games (unique titles):     {0}".format(plan.total_titles))
+    print("Releases found in total:   {0}".format(plan.total_releases))
+    print("Files kept in place:       {0}".format(plan.kept_files))
+    print("Files marked as dupes:     {0}".format(plan.dup_files))
+    print("BIOS files set aside:      {0}".format(len(plan.bios_moves)))
+    print("Proto/Beta files set aside:{0}".format(len(plan.proto_beta_moves)))
+    print("Redundant raw disc files:  {0}".format(len(plan.redundant_moves)))
     if filter_file_used:
         print("Filter file used:          {0}".format(filter_file_used))
-        print("Files skipped by filter:   {0}".format(filtered_out))
-    if skipped and args.verbose:
-        print("Skipped (unrecognized extension): {0}".format(len(skipped)))
+        print("Files skipped by filter:   {0}".format(plan.filtered_out))
+    if plan.skipped and args.verbose:
+        print("Skipped (unrecognized extension): {0}".format(len(plan.skipped)))
     print("=" * 60)
 
     def print_filter_report():
@@ -1615,14 +1802,14 @@ def main():
             print("\n[blacklist] whole titles -- always left untouched:")
             for norm, original in sorted(blacklist_titles.items(),
                                           key=lambda kv: kv[1].lower()):
-                count = blacklist_hits.get(norm, 0)
+                count = plan.blacklist_hits.get(norm, 0)
                 note = "({0} file(s) protected)".format(count) if count else "(no matching files found)"
                 print("  {0}  {1}".format(original, note))
 
         if blacklist_releases:
             print("\n[blacklist] specific releases -- always forced to duplicate:")
             for title_key, tag_set, original in sorted(blacklist_releases, key=lambda e: e[2].lower()):
-                count = force_dup_hits.get(original, 0)
+                count = plan.force_dup_hits.get(original, 0)
                 note = "({0} file(s) forced to dup)".format(count) if count else "(no matching files found)"
                 print("  {0}  {1}".format(original, note))
 
@@ -1630,14 +1817,14 @@ def main():
             print("\n[whitelist] whole titles -- only these titles are processed:")
             for norm, original in sorted(whitelist_titles.items(),
                                           key=lambda kv: kv[1].lower()):
-                count = whitelist_hits.get(norm, 0)
+                count = plan.whitelist_hits.get(norm, 0)
                 note = "({0} file(s) matched)".format(count) if count else "(no matching files found)"
                 print("  {0}  {1}".format(original, note))
 
         if whitelist_releases:
             print("\n[whitelist] specific releases -- pinned as the forced keeper:")
             for title_key, tag_set, original in sorted(whitelist_releases, key=lambda e: e[2].lower()):
-                count = pin_hits.get(original, 0)
+                count = plan.pin_hits.get(original, 0)
                 note = "({0} file(s) pinned)".format(count) if count else "(no matching files found)"
                 print("  {0}  {1}".format(original, note))
 
@@ -1653,10 +1840,10 @@ def main():
             print("Last scanned: never (this is the first scan of this folder)")
 
     summary = {
-        "games": len(titles), "releases": total_releases, "kept": kept_files,
-        "dup": dup_files, "bios": len(bios_files),
-        "proto_beta": len(proto_beta_files), "redundant": len(redundant_disc_files),
-        "filtered": filtered_out,
+        "games": plan.total_titles, "releases": plan.total_releases,
+        "kept": plan.kept_files, "dup": plan.dup_files,
+        "bios": len(plan.bios_moves), "proto_beta": len(plan.proto_beta_moves),
+        "redundant": len(plan.redundant_moves), "filtered": plan.filtered_out,
     }
     run_mode = "APPLY" if args.apply else "DRY RUN"
 
@@ -1678,18 +1865,13 @@ def main():
         return
 
     os.makedirs(dup_dir, exist_ok=True)
-    if bios_files:
-        os.makedirs(bios_dir, exist_ok=True)
-    if proto_beta_files:
-        os.makedirs(proto_beta_dir, exist_ok=True)
-    if redundant_disc_files:
-        os.makedirs(redundant_dir, exist_ok=True)
     moved = 0
     errors = 0
     source_dirs = set()
     for src, dest in to_move:
         try:
             source_dirs.add(os.path.dirname(src))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.move(src, dest)
             moved += 1
         except OSError as e:

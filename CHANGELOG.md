@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.6.1
+
+- Fixed a data-loss bug: two files with the same name in different
+  folders could be moved onto the same path inside `.duplicates/`, and
+  the second silently overwrote the first (the run still reported
+  "Moved 2/2"). This happened whenever one release had same-named pieces
+  in more than one folder -- e.g. the same ROM filed under both a bucket
+  folder and the console root. Nothing has moved yet while the scan is
+  being planned, so checking only whether a destination already exists on
+  disk handed the same free path to both files; planned destinations are
+  now reserved as they're assigned, so the second gets `Name (1).ext` the
+  same way an on-disk collision already did. Affected the main duplicates
+  folder and the `bios/`, `Proto-Beta/` and `Redundant-Raw-Disc/`
+  subfolders alike. The standalone operations (`--flatten-alpha-dirs`,
+  `--convert-to-chd`, `--make-m3u`) already reserved destinations and
+  were never affected.
+- Internal: split the normal duplicate scan out of `main()` into
+  `plan_duplicate_scan()` (plus `scan_rom_files()`,
+  `split_redundant_raw_disc()` and `decide_title_keeper()`), with
+  `print_scan_plan()` handling the reporting. The scan now follows the
+  same plan-then-report/apply split every other operation in the tool
+  already used, so which release wins a comparison can be checked
+  directly instead of only by reading printed output -- the scoring cases
+  fixed in 1.3.1 through 1.6.0 are now covered by unit tests rather than
+  by hand-run spot checks. No change to behavior: output and resulting
+  file layout are byte-for-byte identical to 1.6.0 apart from the
+  overwrite fix above.
+
 ## 1.6.0
 
 - Reworked duplicate-scoring priority order to (after CHD-over-raw-disc

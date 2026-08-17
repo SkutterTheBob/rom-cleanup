@@ -926,6 +926,316 @@ def test_remove_now_empty_dirs_ignores_paths_outside_roms_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# Unit tests: the normal duplicate scan (plan_duplicate_scan and friends)
+#
+# These exercise the scan's actual decisions directly, without shelling
+# out to the script and grepping its printed output.
+# ---------------------------------------------------------------------
+
+def default_dup_dir(tmp_path):
+    return str(tmp_path / ".duplicates")
+
+
+def write_rom(tmp_path, filename, size=100):
+    """Create a ROM file of a given size. Size matters because it's the
+    final tiebreak in score_release().
+    """
+    path = tmp_path / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    return path
+
+
+def releases_from(tmp_path, *specs):
+    """Build the {release_key: [(path, tags), ...]} mapping that
+    decide_title_keeper() takes, from a set of filenames all belonging to
+    one title. A spec is either "Name (USA).zip" or ("Name (USA).zip", size).
+    """
+    releases = {}
+    for spec in specs:
+        filename, size = spec if isinstance(spec, tuple) else (spec, 100)
+        path = write_rom(tmp_path, filename, size)
+        _title, tags = rc.extract_tags(os.path.splitext(filename)[0])
+        key = tuple(sorted(t.lower() for t in tags if not rc.is_part_tag(t)))
+        releases.setdefault(key, []).append((str(path), tags))
+    return releases
+
+
+def keeper_filename(tmp_path, *specs):
+    """Which of these competing releases does the scan keep? Returns the
+    winning file's basename, so scoring expectations read as filenames.
+    """
+    releases = releases_from(tmp_path, *specs)
+    decision, _pinned_lines = rc.decide_title_keeper(
+        "title", releases, rc.DEFAULT_REGION_PRIORITY)
+    winning_path = decision.releases[decision.keeper_key][0][0]
+    return os.path.basename(winning_path)
+
+
+# -- scoring regressions, as direct unit tests --------------------------
+# Each of these is a real case reported against the tool; before the scan
+# was extracted from main() they could only be checked by running the
+# script and reading its output.
+
+def test_decide_title_keeper_prefers_usa_over_europe(tmp_path):
+    assert keeper_filename(
+        tmp_path, "G (USA).zip", "G (Europe).zip") == "G (USA).zip"
+
+
+def test_decide_title_keeper_prefers_higher_revision(tmp_path):
+    assert keeper_filename(
+        tmp_path, "G (USA).zip", "G (USA) (Rev 1).zip") == "G (USA) (Rev 1).zip"
+
+
+def test_decide_title_keeper_multi_region_english_beats_japan(tmp_path):
+    # Turok: a combined-region release that also lists its languages is a
+    # normal release, not a tagged oddity, so it beats a plain Japan copy.
+    assert keeper_filename(
+        tmp_path,
+        "G (USA, Europe) (En,Fr,De,Es).zip",
+        "G (Japan).zip") == "G (USA, Europe) (En,Fr,De,Es).zip"
+
+
+def test_decide_title_keeper_sgb_enhanced_is_neutral(tmp_path):
+    # Smurfs: "(SGB Enhanced)" is a technical footnote, not a re-release tag.
+    assert keeper_filename(
+        tmp_path,
+        "G (USA, Europe) (SGB Enhanced).zip",
+        "G (Japan).zip") == "G (USA, Europe) (SGB Enhanced).zip"
+
+
+def test_decide_title_keeper_world_beats_japan_even_with_collection_tag(tmp_path):
+    # Sa-Ga 3: World is simply the better region tier, and no plain-World
+    # release exists to compete with instead.
+    assert keeper_filename(
+        tmp_path,
+        "G (World) (Collection of SaGa).zip",
+        "G (Japan).zip") == "G (World) (Collection of SaGa).zip"
+
+
+def test_decide_title_keeper_explicit_en_tag_beats_plain_europe(tmp_path):
+    # Mickey Mouse: "Europe" alone doesn't confirm English; "(En)" does.
+    assert keeper_filename(
+        tmp_path, "G (Japan) (En).zip", "G (Europe).zip") == "G (Japan) (En).zip"
+
+
+def test_decide_title_keeper_plain_usa_still_beats_explicit_en_tag(tmp_path):
+    assert keeper_filename(
+        tmp_path, "G (Japan) (En).zip", "G (USA).zip") == "G (USA).zip"
+
+
+def test_decide_title_keeper_re_release_loses_despite_larger_size(tmp_path):
+    # Virtual Console/Switch Online dumps are often bigger than the
+    # original cartridge dump, so they must not win the size tiebreak.
+    assert keeper_filename(
+        tmp_path,
+        ("G (USA) (Virtual Console).zip", 5000),
+        ("G (USA).zip", 100)) == "G (USA).zip"
+
+
+def test_decide_title_keeper_chd_beats_raw_disc_images(tmp_path):
+    assert keeper_filename(
+        tmp_path, "G (USA).chd", "G (Japan).cue") == "G (USA).chd"
+
+
+def test_decide_title_keeper_single_release_is_uncontested(tmp_path):
+    releases = releases_from(tmp_path, "G (Japan) (Virtual Console).zip")
+    decision, _ = rc.decide_title_keeper("g", releases, rc.DEFAULT_REGION_PRIORITY)
+    # Only copy on hand wins even carrying a non-standard tag, and nothing
+    # was really decided, so it isn't worth reporting outside verbose mode.
+    assert decision.dupe_keys == []
+    assert decision.contested is False
+
+
+# -- filter interaction -------------------------------------------------
+
+def test_decide_title_keeper_whitelist_pin_overrides_scoring(tmp_path):
+    releases = releases_from(tmp_path, "G (USA).zip", "G (Japan).zip")
+    pin = [("title", frozenset({"japan"}), "G (Japan)")]
+    decision, pinned_lines = rc.decide_title_keeper(
+        "title", releases, rc.DEFAULT_REGION_PRIORITY, whitelist_releases=pin)
+
+    assert decision.pinned is True
+    assert pinned_lines == ["G (Japan)"]
+    assert decision.keeper_key == ("japan",)
+
+
+def test_decide_title_keeper_blacklist_forces_release_to_lose(tmp_path):
+    releases = releases_from(tmp_path, "G (USA).zip", "G (Japan).zip")
+    block = [("title", frozenset({"usa"}), "G (USA)")]
+    decision, _ = rc.decide_title_keeper(
+        "title", releases, rc.DEFAULT_REGION_PRIORITY, blacklist_releases=block)
+
+    assert decision.keeper_key == ("japan",)
+    assert ("usa",) in decision.forced_dup_keys
+
+
+def test_decide_title_keeper_all_blacklisted_keeps_one_and_warns(tmp_path):
+    releases = releases_from(tmp_path, "G (USA).zip", "G (Japan).zip")
+    block = [
+        ("title", frozenset({"usa"}), "G (USA)"),
+        ("title", frozenset({"japan"}), "G (Japan)"),
+    ]
+    warnings = []
+    decision, _ = rc.decide_title_keeper(
+        "title", releases, rc.DEFAULT_REGION_PRIORITY,
+        blacklist_releases=block, warnings=warnings)
+
+    # Never lose the game entirely -- fall back to scoring, but say so.
+    assert decision.keeper_key == ("usa",)
+    assert len(warnings) == 1
+    assert "blacklisted" in warnings[0]
+
+
+def test_decide_title_keeper_conflicting_pins_warn_and_take_the_first(tmp_path):
+    releases = releases_from(tmp_path, "G (USA).zip", "G (Japan).zip")
+    pins = [
+        ("title", frozenset({"usa"}), "G (USA)"),
+        ("title", frozenset({"japan"}), "G (Japan)"),
+    ]
+    warnings = []
+    decision, _ = rc.decide_title_keeper(
+        "title", releases, rc.DEFAULT_REGION_PRIORITY,
+        whitelist_releases=pins, warnings=warnings)
+
+    assert decision.pinned is True
+    assert len(warnings) == 1
+    assert "pin different releases" in warnings[0]
+
+
+# -- grouping and routing ----------------------------------------------
+
+def test_scan_rom_files_groups_multi_file_release_as_one(tmp_path):
+    write_rom(tmp_path, "G (USA) (Track 01).bin")
+    write_rom(tmp_path, "G (USA) (Track 02).bin")
+    write_rom(tmp_path, "G (USA).cue")
+
+    titles, _bios, _proto, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+        str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
+
+    assert list(titles) == ["g"]
+    # one release, not three competing "duplicates" of each other
+    assert len(titles["g"]) == 1
+    assert len(titles["g"][("usa",)]) == 3
+
+
+def test_scan_rom_files_separates_bios_and_proto_beta(tmp_path):
+    write_rom(tmp_path, "G (USA).zip")
+    write_rom(tmp_path, "Machine [BIOS].bin")
+    write_rom(tmp_path, "G (USA) (Proto).zip")
+
+    titles, bios, proto, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+        str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
+
+    assert list(titles) == ["g"]
+    assert [os.path.basename(p) for p in bios] == ["Machine [BIOS].bin"]
+    assert [os.path.basename(p) for p in proto] == ["G (USA) (Proto).zip"]
+
+
+def test_split_redundant_raw_disc_leaves_release_holding_the_chd(tmp_path):
+    chd = write_rom(tmp_path, "G (USA).chd")
+    cue = write_rom(tmp_path, "G (USA).cue")
+    bin_ = write_rom(tmp_path, "G (USA).bin")
+    titles = {"g": {("usa",): [(str(chd), ["USA"]), (str(cue), ["USA"]),
+                                (str(bin_), ["USA"])]}}
+
+    redundant = rc.split_redundant_raw_disc(titles)
+
+    assert sorted(os.path.basename(p) for p in redundant) == [
+        "G (USA).bin", "G (USA).cue"]
+    assert [os.path.basename(p) for p, _t in titles["g"][("usa",)]] == ["G (USA).chd"]
+
+
+def test_split_redundant_raw_disc_ignores_release_without_a_chd(tmp_path):
+    cue = write_rom(tmp_path, "G (USA).cue")
+    titles = {"g": {("usa",): [(str(cue), ["USA"])]}}
+
+    assert rc.split_redundant_raw_disc(titles) == []
+    assert len(titles["g"][("usa",)]) == 1
+
+
+def test_plan_duplicate_scan_routes_each_category_to_its_own_subfolder(tmp_path):
+    write_rom(tmp_path, "G (USA).zip")
+    write_rom(tmp_path, "G (Europe).zip")
+    write_rom(tmp_path, "Machine [BIOS].bin")
+    write_rom(tmp_path, "H (USA) (Proto).zip")
+    write_rom(tmp_path, "J (USA).chd")
+    write_rom(tmp_path, "J (USA).cue")
+
+    dup_dir = default_dup_dir(tmp_path)
+    plan = rc.plan_duplicate_scan(str(tmp_path), dup_dir)
+
+    def dest_dirs(moves):
+        return {os.path.basename(os.path.dirname(d)) for _s, d in moves}
+
+    assert dest_dirs(plan.dup_moves) == {".duplicates"}
+    assert dest_dirs(plan.bios_moves) == {rc.BIOS_SUBDIR}
+    assert dest_dirs(plan.proto_beta_moves) == {rc.PROTO_BETA_SUBDIR}
+    assert dest_dirs(plan.redundant_moves) == {rc.REDUNDANT_DISC_SUBDIR}
+
+
+def test_plan_duplicate_scan_counts_line_up_with_planned_moves(tmp_path):
+    write_rom(tmp_path, "G (USA).zip")
+    write_rom(tmp_path, "G (Europe).zip")
+    write_rom(tmp_path, "G (Japan).zip")
+    write_rom(tmp_path, "H (USA).zip")
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert plan.total_titles == 2
+    assert plan.total_releases == 4
+    assert plan.dup_files == len(plan.dup_moves) == 2
+    assert plan.kept_files == 2
+
+
+# -- destination reservation (regression) -------------------------------
+
+def test_plan_duplicate_scan_never_plans_two_moves_onto_one_destination(tmp_path):
+    """Two files with the same basename in different folders are pieces of
+    one release. Nothing has moved yet at planning time, so an on-disk
+    existence check alone hands both the same free destination -- and the
+    second shutil.move() silently overwrites the first.
+    """
+    write_rom(tmp_path / "A", "Some Game (Japan).zip")
+    write_rom(tmp_path / "B", "Some Game (Japan).zip")
+    write_rom(tmp_path, "Some Game (USA).zip")
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path))
+
+    dests = [dest for _src, dest in plan.dup_moves]
+    assert len(dests) == 2
+    assert len(set(dests)) == 2
+
+
+def test_plan_duplicate_scan_reserves_destinations_in_every_category(tmp_path):
+    for folder in ("A", "B"):
+        write_rom(tmp_path / folder, "Machine [BIOS].bin")
+        write_rom(tmp_path / folder, "H (USA) (Proto).zip")
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path))
+
+    for moves in (plan.bios_moves, plan.proto_beta_moves):
+        dests = [dest for _src, dest in moves]
+        assert len(dests) == 2
+        assert len(set(dests)) == 2
+
+
+def test_apply_does_not_overwrite_same_named_duplicates(tmp_path):
+    """End-to-end guarantee behind the reservation: no file is lost."""
+    (tmp_path / "A").mkdir()
+    (tmp_path / "B").mkdir()
+    (tmp_path / "A" / "Some Game (Japan).zip").write_bytes(b"payload-A")
+    (tmp_path / "B" / "Some Game (Japan).zip").write_bytes(b"payload-B")
+    (tmp_path / "Some Game (USA).zip").write_bytes(b"keeper")
+
+    run_script(tmp_path, "--apply")
+
+    survived = sorted(p.read_bytes() for p in (tmp_path / ".duplicates").iterdir()
+                      if p.is_file())
+    assert survived == [b"payload-A", b"payload-B"]
+
+
+# ---------------------------------------------------------------------
 # Integration helpers
 # ---------------------------------------------------------------------
 
