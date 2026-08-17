@@ -1395,7 +1395,8 @@ def test_scan_rom_files_groups_multi_file_release_as_one(tmp_path):
     write_rom(tmp_path, "G (USA) (Track 02).bin")
     write_rom(tmp_path, "G (USA).cue")
 
-    titles, _bios, _proto, _program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+    (titles, _bios, _proto, _program, _reject, _reject_hits, _skipped,
+     _filtered, _bl, _wl) = rc.scan_rom_files(
         str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
 
     assert list(titles) == ["g"]
@@ -1409,7 +1410,8 @@ def test_scan_rom_files_separates_bios_and_proto_beta(tmp_path):
     write_rom(tmp_path, "Machine [BIOS].bin")
     write_rom(tmp_path, "G (USA) (Proto).zip")
 
-    titles, bios, proto, _program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+    (titles, bios, proto, _program, _reject, _reject_hits, _skipped,
+     _filtered, _bl, _wl) = rc.scan_rom_files(
         str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
 
     assert list(titles) == ["g"]
@@ -1421,7 +1423,8 @@ def test_scan_rom_files_pulls_out_program_tagged_files(tmp_path):
     write_rom(tmp_path, "G (USA).zip")
     write_rom(tmp_path, "Sega Channel (USA) (General Instrument) (Program).7z")
 
-    titles, _bios, _proto, program, _skipped, _filtered, _bl, _wl = rc.scan_rom_files(
+    (titles, _bios, _proto, program, _reject, _reject_hits, _skipped,
+     _filtered, _bl, _wl) = rc.scan_rom_files(
         str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT, {}, {})
 
     assert list(titles) == ["g"]
@@ -1487,6 +1490,124 @@ def test_plan_duplicate_scan_program_tag_bypasses_never_lose_a_game_guard(tmp_pa
     assert plan.total_titles == 0  # never even entered title grouping
     assert len(plan.program_moves) == 1
     assert plan.dup_moves == []
+
+
+# -- [reject] filter entries --------------------------------------------
+
+def test_plan_duplicate_scan_reject_title_bypasses_never_lose_a_game_guard(tmp_path):
+    """[reject] is the escape hatch for a release with no recognizable tag
+    of its own (unlike (Program)/[BIOS]/proto-beta) that's still the only
+    file under its made-up title -- e.g. a one-off compilation. A
+    release-specific [blacklist] entry can't touch it (no duplicate
+    comparison ever happens), but [reject] always routes it away.
+    """
+    write_rom(tmp_path, "Arcade Legends Sega Mega Drive (World).7z")
+    reject_titles = {"arcade legends sega mega drive": "Arcade Legends Sega Mega Drive"}
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path),
+                                   reject_titles=reject_titles)
+
+    assert plan.total_titles == 0  # never even entered title grouping
+    assert len(plan.reject_moves) == 1
+    assert os.path.basename(os.path.dirname(plan.reject_moves[0][1])) == rc.REJECT_SUBDIR
+    assert plan.dup_moves == []
+
+
+def test_plan_duplicate_scan_reject_release_only_matches_that_release(tmp_path):
+    write_rom(tmp_path, "G (USA).zip")
+    write_rom(tmp_path, "G (Japan) (Bad Dump).zip")
+    reject_releases = [("g", frozenset({"bad dump"}), "G (Bad Dump)")]
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path),
+                                   reject_releases=reject_releases)
+
+    assert len(plan.reject_moves) == 1
+    assert "Bad Dump" in plan.reject_moves[0][0]
+    # the USA release never competed against anything -- sole survivor, uncontested
+    assert plan.total_titles == 1
+    assert plan.dup_moves == []
+
+
+def test_plan_duplicate_scan_reject_takes_precedence_over_blacklist(tmp_path):
+    """[reject] is the more explicit, more recent signal -- if a title
+    somehow ends up in both [blacklist] (protect) and [reject] (remove),
+    reject wins.
+    """
+    write_rom(tmp_path, "G (USA).zip")
+    reject_titles = {"g": "G"}
+    blacklist_titles = {"g": "G"}
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path),
+                                   reject_titles=reject_titles,
+                                   blacklist_titles=blacklist_titles)
+
+    assert len(plan.reject_moves) == 1
+    assert plan.filtered_out == 0  # never reached the blacklist check
+    assert plan.total_titles == 0
+
+
+def test_plan_duplicate_scan_reject_hits_tracked_by_filter_line(tmp_path):
+    write_rom(tmp_path, "Arcade Legends Sega Mega Drive (World).7z")
+    write_rom(tmp_path, "Another Rejected Thing (USA).zip")
+    reject_titles = {
+        "arcade legends sega mega drive": "Arcade Legends Sega Mega Drive",
+        "another rejected thing": "Another Rejected Thing",
+    }
+
+    plan = rc.plan_duplicate_scan(str(tmp_path), default_dup_dir(tmp_path),
+                                   reject_titles=reject_titles)
+
+    assert plan.reject_hits["Arcade Legends Sega Mega Drive"] == 1
+    assert plan.reject_hits["Another Rejected Thing"] == 1
+
+
+def test_apply_moves_rejected_sole_copy_out_of_roms_dir(tmp_path):
+    """End-to-end: a [reject]-listed compilation with no other release to
+    compete against actually leaves roms_dir with --apply.
+    """
+    touch(tmp_path / "Arcade Legends Sega Mega Drive (World).7z")
+    touch(tmp_path / "Keeper (USA).zip")
+    (tmp_path / "rom_filters.txt").write_text(
+        "[reject]\nArcade Legends Sega Mega Drive\n", encoding="utf-8")
+
+    run_script(tmp_path, "--apply")
+
+    assert not (tmp_path / "Arcade Legends Sega Mega Drive (World).7z").exists()
+    assert (tmp_path / ".duplicates" / rc.REJECT_SUBDIR
+            / "Arcade Legends Sega Mega Drive (World).7z").exists()
+    assert (tmp_path / "Keeper (USA).zip").exists()
+
+
+def test_plan_isolate_imports_leaves_rejected_title_in_place(tmp_path):
+    """A rejected title with no NA release shouldn't be swept into
+    .imports/ -- it's headed for .duplicates/Rejected/ via the normal
+    scan instead, not treated as a foreign import.
+    """
+    touch(tmp_path / "Rejected Thing (Japan).zip")
+    reject_titles = {"rejected thing": "Rejected Thing"}
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(
+        str(tmp_path), default_dup_dir(tmp_path), reject_titles=reject_titles)
+
+    assert to_move == []
+    assert kept == []
+    assert imports == []
+    assert filtered_out == 1
+
+
+def test_load_filter_file_parses_reject_section(tmp_path):
+    path = tmp_path / "filters.txt"
+    path.write_text(
+        "[reject]\n"
+        "Arcade Legends Sega Mega Drive\n"
+        "Some Game (Bad Dump)\n",
+        encoding="utf-8")
+
+    parsed = rc.load_filter_file(str(path))
+
+    assert "arcade legends sega mega drive" in parsed["reject_titles"]
+    assert parsed["reject_releases"] == [
+        ("some game", frozenset({"bad dump"}), "Some Game (Bad Dump)")]
 
 
 def test_plan_duplicate_scan_counts_line_up_with_planned_moves(tmp_path):

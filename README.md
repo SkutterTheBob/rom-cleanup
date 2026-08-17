@@ -70,6 +70,14 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   is, so nothing in `rom_filters.txt` could otherwise touch it (there's no
   duplicate comparison for a release-specific `[blacklist]` entry to force
   it to lose).
+- **Supports a `[reject]` filter section** for the same problem when there's
+  no recognizable tag to catch it automatically — e.g. a one-off
+  compilation like `Arcade Legends Sega Mega Drive (World)` with no `[BIOS]`/
+  proto-beta/`(Program)` tag and no other release to compete against.
+  `[reject]` always routes a matching title or release to
+  `.duplicates/Rejected/`, with no duplicate comparison needed at all, and
+  takes precedence over `[blacklist]`/`[whitelist]` for that title. See the
+  filter file section below.
 - **Cleans up redundant raw disc images** — if a release folder has both a
   `.chd` and leftover `.bin`/`.cue` for the same disc, the raw files move
   to `.duplicates/Redundant-Raw-Disc/` and only the `.chd` is kept.
@@ -164,15 +172,17 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   `.imports/` is invisible to this pass, never reconsidered. A leftover
   visible `Imports/` folder from before this one was hidden is migrated
   into `.imports/` automatically. Respects
-  `rom_filters.txt` (see below): a whole-title `[blacklist]` entry always
-  wins and keeps that title in place; a whole-title `[whitelist]` entry
-  restricts scope to only whitelisted titles; a release-specific
-  `[whitelist]` entry (pinning one exact release) also keeps that title
-  in place, even outside an active whole-title whitelist's scope — a
-  release-specific `[blacklist]` entry does NOT apply here, since its
-  meaning ("force this release to lose the duplicate comparison")
-  doesn't translate to "protect it from being moved". Also runs
-  standalone and respects `--apply`.
+  `rom_filters.txt` (see below): a whole-title `[blacklist]` or `[reject]`
+  entry always wins and keeps that title in place (a rejected title is
+  routed to `.duplicates/Rejected/` via the normal scan instead of moved
+  here); a whole-title `[whitelist]` entry restricts scope to only
+  whitelisted titles; a release-specific `[whitelist]` entry (pinning one
+  exact release) also keeps that title in place, even outside an active
+  whole-title whitelist's scope — a release-specific `[blacklist]` or
+  `[reject]` entry does NOT apply here, since its meaning ("force this
+  release to lose the duplicate comparison") doesn't translate to
+  "protect it from being moved". Also runs standalone and respects
+  `--apply`.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -246,6 +256,14 @@ Mario Kart
 # Release-specific entry: pin THIS exact release as the forced
 # keeper for its title, overriding the normal scoring
 Shadow Dancer - The Secret of Shinobi (World)
+
+[reject]
+# Always route this to .duplicates/Rejected/ -- no duplicate
+# comparison needed, unlike a release-specific [blacklist] entry.
+# For a release with no recognizable tag of its own that's still
+# the only file under its made-up title (so blacklist can't touch
+# it -- there's nothing for it to lose a comparison to).
+Arcade Legends Sega Mega Drive
 ```
 
 Rules:
@@ -255,6 +273,14 @@ Rules:
   release. You don't need to spell out every tag — just enough to
   identify the release (subset matching).
 - Blacklist always wins over whitelist for the same release.
+- `[reject]` always wins over both, for the same title — it's the most
+  explicit signal available ("I know what this is, get it out"), and
+  doesn't depend on a duplicate comparison happening at all. A
+  release-specific `[reject]` entry, like a release-specific `[blacklist]`
+  entry, only matters if the release actually exists on disk — it can't
+  create a comparison where none exists, but it *can* route a release away
+  before it ever gets a chance to be the sole survivor of an empty
+  comparison.
 - The bottom of every run's output shows exactly which filter entries
   matched (and flags any that matched nothing — handy for catching typos).
 

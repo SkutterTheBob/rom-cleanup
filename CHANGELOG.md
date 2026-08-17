@@ -59,6 +59,20 @@
   `--isolate-imports` gets the same exclusion -- a non-NA-region
   `(Program)` utility isn't a foreign release of a real game, so it
   shouldn't be swept into `.imports/` just for lacking a `USA`/`World` tag.
+- Added a `[reject]` section to `rom_filters.txt`, for the same "only copy
+  of its title, never enters a duplicate comparison" problem `(Program)`
+  above solves for utility discs -- but for a release with no recognizable
+  tag of its own, e.g. a one-off compilation like `Arcade Legends Sega
+  Mega Drive (World)`. A release-specific `[blacklist]` entry can't do
+  anything here (there's no competing release for it to lose a comparison
+  to), so `[reject]` always routes a matching whole title or specific
+  release straight to `.duplicates/Rejected/`, no comparison needed at
+  all. Checked first in the scan, ahead of `[blacklist]`/`[whitelist]`
+  scoping -- it's the most explicit signal available ("I know what this
+  is, get it out"), so it always wins for that title.
+  `--isolate-imports` treats a whole-title `[reject]` entry the same as
+  `[blacklist]`: left in place rather than swept into `.imports/`, since
+  it's headed for `.duplicates/Rejected/` via the normal scan instead.
 
 ## 1.6.1
 

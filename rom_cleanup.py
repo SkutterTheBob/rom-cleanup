@@ -335,7 +335,7 @@ def score_release(release_tags, total_size, region_priority, fmt_rank=0):
     return (fmt_rank, eff_tier, eff_rrank, non_standard, lang_rank, -rev, -total_size)
 
 
-SECTION_RE = re.compile(r"^\[\s*(whitelist|blacklist)\s*\]\s*$", re.IGNORECASE)
+SECTION_RE = re.compile(r"^\[\s*(whitelist|blacklist|reject)\s*\]\s*$", re.IGNORECASE)
 
 
 def parse_filter_line(line):
@@ -371,7 +371,8 @@ def parse_filter_line(line):
 
 
 def load_filter_file(path):
-    """Parse a flat text file with [whitelist] and/or [blacklist] sections.
+    """Parse a flat text file with [whitelist], [blacklist], and/or
+    [reject] sections.
 
     Example:
         [whitelist]
@@ -382,6 +383,9 @@ def load_filter_file(path):
         Some Beta Build
         Shadow Dancer - The Secret of Shinobi (SEGA Classic Collection)
 
+        [reject]
+        Arcade Legends Sega Mega Drive
+
     A line with no region/tag info (e.g. "Chrono Trigger") applies to the
     WHOLE title. A line that includes tags (e.g. "... (World)") targets
     any release whose tags contain those given (you don't need to spell
@@ -389,20 +393,32 @@ def load_filter_file(path):
     pin which version should be kept, or force a specific version to
     always be treated as a duplicate.
 
+    [reject] is different from [blacklist]: a release-specific [blacklist]
+    entry only matters when it has competing releases to lose a comparison
+    to, so it can't do anything for a release that's the ONLY copy of its
+    title on hand -- e.g. a made-up compilation/utility title with no
+    other release to compete against. [reject] always routes a matching
+    file to .duplicates/Rejected/, with no duplicate comparison involved
+    at all, and takes precedence over blacklist/whitelist scoping for that
+    title.
+
     Blank lines and lines starting with # are ignored. Lines before the
     first section header are ignored.
 
-    Returns a dict with four entries:
+    Returns a dict with six entries:
         {
           "whitelist_titles":   {title_key: line},
           "whitelist_releases": [(title_key, frozenset_of_tags, line), ...],
           "blacklist_titles":   {title_key: line},
           "blacklist_releases": [(title_key, frozenset_of_tags, line), ...],
+          "reject_titles":      {title_key: line},
+          "reject_releases":    [(title_key, frozenset_of_tags, line), ...],
         }
     """
     result = {
         "whitelist_titles": {}, "whitelist_releases": [],
         "blacklist_titles": {}, "blacklist_releases": [],
+        "reject_titles": {}, "reject_releases": [],
     }
     current = None
 
@@ -435,16 +451,17 @@ def resolve_filter_file(roms_dir, filter_file_arg):
     the CLI's shared convention: an explicit filter_file_arg must exist
     (hard error if not); otherwise <roms_dir>/rom_filters.txt is used
     automatically if present. Warns if the resolved file has no
-    [whitelist]/[blacklist] entries at all.
+    [whitelist]/[blacklist]/[reject] entries at all.
 
     Returns (parsed, filter_file_used): parsed is the same dict
-    load_filter_file() returns (all four keys empty if no filter file was
+    load_filter_file() returns (all six keys empty if no filter file was
     found), and filter_file_used is the path actually used, or None.
     """
     filter_path = filter_file_arg or os.path.join(roms_dir, DEFAULT_FILTER_FILENAME)
     empty = {
         "whitelist_titles": {}, "whitelist_releases": [],
         "blacklist_titles": {}, "blacklist_releases": [],
+        "reject_titles": {}, "reject_releases": [],
     }
 
     if filter_file_arg and not os.path.isfile(filter_path):
@@ -456,9 +473,10 @@ def resolve_filter_file(roms_dir, filter_file_arg):
 
     parsed = load_filter_file(filter_path)
     if not any([parsed["whitelist_titles"], parsed["whitelist_releases"],
-                parsed["blacklist_titles"], parsed["blacklist_releases"]]):
-        print("Warning: filter file '{0}' has no [whitelist]/[blacklist] "
-              "entries -- nothing will be filtered.".format(filter_path),
+                parsed["blacklist_titles"], parsed["blacklist_releases"],
+                parsed["reject_titles"], parsed["reject_releases"]]):
+        print("Warning: filter file '{0}' has no [whitelist]/[blacklist]/"
+              "[reject] entries -- nothing will be filtered.".format(filter_path),
               file=sys.stderr)
     return parsed, filter_path
 
@@ -1309,7 +1327,7 @@ def plan_imports_dir_migration(roms_dir, reserved=None):
 
 
 def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_titles=None,
-                          whitelist_releases=None):
+                          whitelist_releases=None, reject_titles=None):
     """Find every title directly under roms_dir with NO North-American-
     tagged release (no "USA" or "World" tag on ANY of its entries) and
     plan moving every one of that title's entries into
@@ -1348,6 +1366,15 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     the duplicate comparison") doesn't translate to "protect it from
     being moved" -- the opposite of what isolate-imports would need.
 
+    reject_titles: whole-title [reject] entries. A rejected title is left
+    in place here too (same as blacklist_titles) rather than moved to
+    .imports/ -- it's headed for .duplicates/Rejected/ via the normal
+    scan instead, which also walks .imports/ and would just have to
+    re-discover and re-route it there anyway. Release-specific [reject]
+    entries aren't applied here for the same reason release-specific
+    blacklist entries aren't: nothing here corresponds to "losing a
+    duplicate comparison".
+
     Returns (to_move, kept_titles, import_titles, blocked, filtered_out):
         to_move:       [(current_path, final_path), ...]
         kept_titles:   sorted display titles staying in roms_dir
@@ -1360,6 +1387,7 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     blacklist_titles = blacklist_titles or {}
     whitelist_titles = whitelist_titles or {}
     whitelist_releases = whitelist_releases or []
+    reject_titles = reject_titles or {}
     dup_dir_abs = os.path.abspath(dup_dir)
     import_dir = os.path.join(roms_dir, IMPORTS_DIR_NAME)
     titles = defaultdict(list)  # title_key -> [(display_title, tags, path, is_m3u), ...]
@@ -1404,7 +1432,7 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
     for title_key, entries in sorted(titles.items()):
         display_title = entries[0][0]
 
-        if title_key in blacklist_titles:
+        if title_key in blacklist_titles or title_key in reject_titles:
             filtered_out += len(entries)
             continue
 
@@ -1449,7 +1477,8 @@ def plan_isolate_imports(roms_dir, dup_dir, blacklist_titles=None, whitelist_tit
 
 
 def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
-                     whitelist_titles=None, whitelist_releases=None, filter_file_used=None):
+                     whitelist_titles=None, whitelist_releases=None,
+                     reject_titles=None, filter_file_used=None):
     """Print (and, if apply, perform) the plan from plan_isolate_imports:
     move every title with no North-American release into
     <roms_dir>/.imports/. Returns (moved_titles, kept_titles).
@@ -1457,13 +1486,14 @@ def isolate_imports(roms_dir, dup_dir, apply, blacklist_titles=None,
     A leftover visible "Imports/" folder from before this one was hidden is
     migrated into ".imports/" first (see plan_imports_dir_migration).
 
-    blacklist_titles/whitelist_titles/whitelist_releases: passed straight
-    through to plan_isolate_imports -- see there for how rom_filters.txt
-    applies.
+    blacklist_titles/whitelist_titles/whitelist_releases/reject_titles:
+    passed straight through to plan_isolate_imports -- see there for how
+    rom_filters.txt applies.
     """
     to_move, kept_titles, import_titles, blocked, filtered_out = plan_isolate_imports(
         roms_dir, dup_dir, blacklist_titles=blacklist_titles,
-        whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases)
+        whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases,
+        reject_titles=reject_titles)
 
     migration_moves, legacy_dir = plan_imports_dir_migration(roms_dir)
 
@@ -1557,6 +1587,7 @@ def find_release_filter_matches(title_key, release_key, release_entries):
 BIOS_SUBDIR = "bios"
 PROTO_BETA_SUBDIR = "Proto-Beta"
 PROGRAM_SUBDIR = "Program"
+REJECT_SUBDIR = "Rejected"
 REDUNDANT_DISC_SUBDIR = "Redundant-Raw-Disc"
 
 
@@ -1584,9 +1615,10 @@ TitleDecision = namedtuple("TitleDecision", [
 # different folders can never be planned onto the same destination path.
 ScanPlan = namedtuple("ScanPlan", [
     "decisions", "dup_moves", "bios_moves", "proto_beta_moves",
-    "program_moves", "redundant_moves", "skipped", "filtered_out",
-    "blacklist_hits", "whitelist_hits", "pin_hits", "force_dup_hits",
-    "warnings", "total_titles", "total_releases", "kept_files", "dup_files",
+    "program_moves", "reject_moves", "redundant_moves", "skipped",
+    "filtered_out", "blacklist_hits", "whitelist_hits", "reject_hits",
+    "pin_hits", "force_dup_hits", "warnings", "total_titles",
+    "total_releases", "kept_files", "dup_files",
 ])
 
 
@@ -1594,7 +1626,7 @@ def all_planned_moves(plan):
     """Every (src, dest) pair in a ScanPlan, in the order they're reported."""
     return (list(plan.dup_moves) + list(plan.bios_moves)
             + list(plan.proto_beta_moves) + list(plan.program_moves)
-            + list(plan.redundant_moves))
+            + list(plan.reject_moves) + list(plan.redundant_moves))
 
 
 def _plan_move(src, dest_dir, reserved):
@@ -1612,7 +1644,8 @@ def _plan_move(src, dest_dir, reserved):
     return (src, dest)
 
 
-def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles):
+def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles,
+                    reject_titles=None, reject_releases=None):
     """Walk roms_dir and group every recognized ROM file by title, then by
     release within that title.
 
@@ -1630,18 +1663,31 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
     the only copy of a title" guard in decide_title_keeper() would keep it
     in place forever no matter how it's tagged.
 
-    Returns (titles, bios_files, proto_beta_files, program_files, skipped,
-    filtered_out, blacklist_hits, whitelist_hits), where titles is
+    A [reject] entry (rom_filters.txt) is the same idea but for a release
+    with no recognizable tag of its own -- e.g. a one-off compilation like
+    "Arcade Legends Sega Mega Drive (World)" that isn't [BIOS]/proto-beta/
+    (Program) tagged, so nothing else would ever pull it out. Checked
+    first, ahead of blacklist/whitelist scoping and every other category:
+    it's the most explicit signal available ("I know what this is, get it
+    out"), so it always wins.
+
+    Returns (titles, bios_files, proto_beta_files, program_files,
+    reject_files, reject_hits, skipped, filtered_out, blacklist_hits,
+    whitelist_hits), where titles is
     {title_key: {release_key: [(path, tags), ...]}}.
     """
+    reject_titles = reject_titles or {}
+    reject_releases = reject_releases or []
     titles = defaultdict(lambda: defaultdict(list))
     bios_files = []
     proto_beta_files = []
     program_files = []
+    reject_files = []
     skipped = []
     filtered_out = 0
     blacklist_hits = defaultdict(int)   # title_key -> files skipped (title-level)
     whitelist_hits = defaultdict(int)   # title_key -> files processed (title-level)
+    reject_hits = defaultdict(int)      # filter line -> files rejected
 
     for root, dirs, files in os.walk(roms_dir):
         # never descend into the duplicates folder itself
@@ -1659,6 +1705,22 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
             title_key = normalize_title(base_title)
             if not title_key:
                 title_key = normalize_title(stem)
+
+            non_part_tags = tuple(sorted(
+                t.lower() for t in tags if not is_part_tag(t)
+            ))
+
+            if title_key in reject_titles:
+                reject_files.append(fpath)
+                reject_hits[reject_titles[title_key]] += 1
+                continue
+            release_reject_matches = find_release_filter_matches(
+                title_key, non_part_tags, reject_releases)
+            if release_reject_matches:
+                reject_files.append(fpath)
+                for m in release_reject_matches:
+                    reject_hits[m[2]] += 1
+                continue
 
             if title_key in blacklist_titles:
                 filtered_out += 1
@@ -1682,13 +1744,11 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
                 program_files.append(fpath)
                 continue
 
-            non_part_tags = tuple(sorted(
-                t.lower() for t in tags if not is_part_tag(t)
-            ))
             titles[title_key][non_part_tags].append((fpath, tags))
 
-    return (titles, bios_files, proto_beta_files, program_files, skipped,
-            filtered_out, blacklist_hits, whitelist_hits)
+    return (titles, bios_files, proto_beta_files, program_files,
+            reject_files, reject_hits, skipped, filtered_out,
+            blacklist_hits, whitelist_hits)
 
 
 def split_redundant_raw_disc(titles):
@@ -1798,7 +1858,8 @@ def decide_title_keeper(title_key, releases, region_priority,
 
 def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None,
                          whitelist_titles=None, whitelist_releases=None,
-                         blacklist_titles=None, blacklist_releases=None):
+                         blacklist_titles=None, blacklist_releases=None,
+                         reject_titles=None, reject_releases=None):
     """Work out the whole normal duplicate scan without printing or moving
     anything: which release of each title to keep, which to route to
     .duplicates/, and where every moved file lands.
@@ -1814,10 +1875,13 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
     whitelist_releases = whitelist_releases or []
     blacklist_titles = blacklist_titles or {}
     blacklist_releases = blacklist_releases or []
+    reject_titles = reject_titles or {}
+    reject_releases = reject_releases or []
 
-    (titles, bios_files, proto_beta_files, program_files, skipped,
-     filtered_out, blacklist_hits, whitelist_hits) = scan_rom_files(
-        roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles)
+    (titles, bios_files, proto_beta_files, program_files, reject_files,
+     reject_hits, skipped, filtered_out, blacklist_hits, whitelist_hits) = scan_rom_files(
+        roms_dir, dup_dir, extensions, blacklist_titles, whitelist_titles,
+        reject_titles=reject_titles, reject_releases=reject_releases)
 
     redundant_disc_files = split_redundant_raw_disc(titles)
 
@@ -1863,6 +1927,8 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
                         for f in sorted(proto_beta_files)]
     program_moves = [_plan_move(f, os.path.join(dup_dir, PROGRAM_SUBDIR), reserved)
                      for f in sorted(program_files)]
+    reject_moves = [_plan_move(f, os.path.join(dup_dir, REJECT_SUBDIR), reserved)
+                    for f in sorted(reject_files)]
     redundant_moves = [_plan_move(f, os.path.join(dup_dir, REDUNDANT_DISC_SUBDIR), reserved)
                        for f in sorted(redundant_disc_files)]
 
@@ -1872,11 +1938,13 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
         bios_moves=bios_moves,
         proto_beta_moves=proto_beta_moves,
         program_moves=program_moves,
+        reject_moves=reject_moves,
         redundant_moves=redundant_moves,
         skipped=skipped,
         filtered_out=filtered_out,
         blacklist_hits=blacklist_hits,
         whitelist_hits=whitelist_hits,
+        reject_hits=reject_hits,
         pin_hits=pin_hits,
         force_dup_hits=force_dup_hits,
         warnings=warnings,
@@ -1889,8 +1957,9 @@ def plan_duplicate_scan(roms_dir, dup_dir, region_priority=None, extensions=None
 
 def print_scan_plan(plan, roms_dir, verbose=False):
     """Print the per-title KEEP/DUP breakdown of a ScanPlan, followed by the
-    BIOS, proto/beta and redundant-raw-disc sections. Reporting only -- see
-    plan_duplicate_scan() for the half that decides all of this.
+    BIOS, proto/beta, Program, rejected, and redundant-raw-disc sections.
+    Reporting only -- see plan_duplicate_scan() for the half that decides
+    all of this.
     """
     for decision in plan.decisions:
         if not decision.contested:
@@ -1919,6 +1988,7 @@ def print_scan_plan(plan, roms_dir, verbose=False):
         (plan.bios_moves, "BIOS files ({0} found):", "BIOS"),
         (plan.proto_beta_moves, "Proto/Beta files ({0} found):", "PROTO/BETA"),
         (plan.program_moves, "Program files ({0} found):", "PROGRAM"),
+        (plan.reject_moves, "Rejected files ({0} found, via [reject]):", "REJECT"),
         (plan.redundant_moves,
          "Redundant raw disc files ({0} found, CHD already present):", "REDUNDANT"),
     ):
@@ -1973,17 +2043,19 @@ def log_run(roms_dir, mode, filter_file_used, summary, moved=None, errors=0):
         lines.append("filter_file: {0}".format(filter_file_used or "(none)"))
         lines.append(
             "games={0} releases={1} kept={2} dup={3} bios={4} "
-            "proto_beta={5} program={6} redundant={7} filtered={8}".format(
+            "proto_beta={5} program={6} reject={7} redundant={8} "
+            "filtered={9}".format(
                 summary["games"], summary["releases"], summary["kept"],
                 summary["dup"], summary["bios"], summary["proto_beta"],
-                summary["program"], summary["redundant"], summary["filtered"]
+                summary["program"], summary["reject"], summary["redundant"],
+                summary["filtered"]
             )
         )
         if moved is not None:
             lines.append("moved: {0}/{1}  errors: {2}".format(
                 moved,
                 summary["dup"] + summary["bios"] + summary["proto_beta"]
-                + summary["program"] + summary["redundant"],
+                + summary["program"] + summary["reject"] + summary["redundant"],
                 errors))
         lines.append("")
 
@@ -2011,14 +2083,21 @@ def main():
                          help="Comma-separated list of extensions to consider "
                               "(default: common ROM/disc image extensions)")
     parser.add_argument("--filter-file", default=None, metavar="FILE",
-                         help="Path to a flat text file with [whitelist] and/or "
-                              "[blacklist] sections. A plain title line (e.g. "
-                              "'Chrono Trigger') applies to the whole game. A line "
-                              "with tags (e.g. 'Shadow Dancer (World)') targets that "
-                              "one specific release: whitelist it to pin it as the "
-                              "keeper, or blacklist it to force it to always be "
-                              "treated as a duplicate. Default: <roms_dir>/{0} if it "
-                              "exists.".format(DEFAULT_FILTER_FILENAME))
+                         help="Path to a flat text file with [whitelist], "
+                              "[blacklist], and/or [reject] sections. A plain "
+                              "title line (e.g. 'Chrono Trigger') applies to the "
+                              "whole game. A line with tags (e.g. 'Shadow Dancer "
+                              "(World)') targets that one specific release: "
+                              "whitelist it to pin it as the keeper, or blacklist "
+                              "it to force it to always be treated as a duplicate "
+                              "(only matters if another release exists to lose "
+                              "the comparison to). [reject] always routes a "
+                              "matching title/release to .duplicates/{0}/, with "
+                              "no comparison needed -- for a release with no "
+                              "recognizable tag of its own (e.g. a one-off "
+                              "compilation) that would otherwise never leave "
+                              "roms_dir. Default: <roms_dir>/{1} if it "
+                              "exists.".format(REJECT_SUBDIR, DEFAULT_FILTER_FILENAME))
     parser.add_argument("--recursive", action="store_true", default=True,
                          help="Scan subfolders too (default: on)")
     parser.add_argument("--flatten-alpha-dirs", action="store_true",
@@ -2084,17 +2163,20 @@ def main():
                               "hidden disc folder), or a whole release subfolder. "
                               "BIOS-, proto/beta-, and (Program)-tagged entries "
                               "are left alone. "
-                              "Respects the [whitelist]/[blacklist] entries in "
-                              "rom_filters.txt (--filter-file): a whole-title or "
-                              "release-specific whitelist entry keeps that title in "
-                              "place, a whole-title blacklist entry always wins and "
-                              "keeps it too; a release-specific blacklist entry does "
-                              "NOT apply here (it means \"lose the duplicate "
-                              "comparison\", not \"protect from being moved\"). "
+                              "Respects the [whitelist]/[blacklist]/[reject] "
+                              "entries in rom_filters.txt (--filter-file): a "
+                              "whole-title or release-specific whitelist entry "
+                              "keeps that title in place, a whole-title blacklist "
+                              "or [reject] entry always wins and keeps it too "
+                              "(a rejected title is routed to .duplicates/{0}/ "
+                              "via the normal scan instead); a release-specific "
+                              "blacklist or reject entry does NOT apply here (it "
+                              "means \"lose the duplicate comparison\", not "
+                              "\"protect from being moved\"). "
                               "A leftover visible \"Imports/\" folder from before "
                               "this one was hidden is migrated into \".imports/\" "
                               "automatically. Respects --apply (dry-run preview by "
-                              "default). Runs standalone.")
+                              "default). Runs standalone.".format(REJECT_SUBDIR))
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -2138,6 +2220,7 @@ def main():
                          blacklist_titles=parsed_filter["blacklist_titles"],
                          whitelist_titles=parsed_filter["whitelist_titles"],
                          whitelist_releases=parsed_filter["whitelist_releases"],
+                         reject_titles=parsed_filter["reject_titles"],
                          filter_file_used=filter_file_used)
         return
 
@@ -2169,12 +2252,15 @@ def main():
     whitelist_releases = parsed_filter["whitelist_releases"]
     blacklist_titles = parsed_filter["blacklist_titles"]
     blacklist_releases = parsed_filter["blacklist_releases"]
+    reject_titles = parsed_filter["reject_titles"]
+    reject_releases = parsed_filter["reject_releases"]
 
     plan = plan_duplicate_scan(
         roms_dir, dup_dir,
         region_priority=region_priority, extensions=extensions,
         whitelist_titles=whitelist_titles, whitelist_releases=whitelist_releases,
-        blacklist_titles=blacklist_titles, blacklist_releases=blacklist_releases)
+        blacklist_titles=blacklist_titles, blacklist_releases=blacklist_releases,
+        reject_titles=reject_titles, reject_releases=reject_releases)
 
     for warning in plan.warnings:
         print("\nWarning: {0}".format(warning), file=sys.stderr)
@@ -2192,6 +2278,7 @@ def main():
     print("BIOS files set aside:      {0}".format(len(plan.bios_moves)))
     print("Proto/Beta files set aside:{0}".format(len(plan.proto_beta_moves)))
     print("Program files set aside:   {0}".format(len(plan.program_moves)))
+    print("Rejected files set aside:  {0}".format(len(plan.reject_moves)))
     print("Redundant raw disc files:  {0}".format(len(plan.redundant_moves)))
     if filter_file_used:
         print("Filter file used:          {0}".format(filter_file_used))
@@ -2202,9 +2289,27 @@ def main():
 
     def print_filter_report():
         if not (filter_file_used and any([whitelist_titles, whitelist_releases,
-                                           blacklist_titles, blacklist_releases])):
+                                           blacklist_titles, blacklist_releases,
+                                           reject_titles, reject_releases])):
             return
         print("\n--- Filter file details ({0}) ---".format(filter_file_used))
+
+        if reject_titles:
+            print("\n[reject] whole titles -- always routed to .duplicates/{0}/:".format(
+                REJECT_SUBDIR))
+            for norm, original in sorted(reject_titles.items(),
+                                          key=lambda kv: kv[1].lower()):
+                count = plan.reject_hits.get(original, 0)
+                note = "({0} file(s) rejected)".format(count) if count else "(no matching files found)"
+                print("  {0}  {1}".format(original, note))
+
+        if reject_releases:
+            print("\n[reject] specific releases -- always routed to .duplicates/{0}/:".format(
+                REJECT_SUBDIR))
+            for title_key, tag_set, original in sorted(reject_releases, key=lambda e: e[2].lower()):
+                count = plan.reject_hits.get(original, 0)
+                note = "({0} file(s) rejected)".format(count) if count else "(no matching files found)"
+                print("  {0}  {1}".format(original, note))
 
         if blacklist_titles:
             print("\n[blacklist] whole titles -- always left untouched:")
@@ -2251,7 +2356,8 @@ def main():
         "games": plan.total_titles, "releases": plan.total_releases,
         "kept": plan.kept_files, "dup": plan.dup_files,
         "bios": len(plan.bios_moves), "proto_beta": len(plan.proto_beta_moves),
-        "program": len(plan.program_moves), "redundant": len(plan.redundant_moves),
+        "program": len(plan.program_moves), "reject": len(plan.reject_moves),
+        "redundant": len(plan.redundant_moves),
         "filtered": plan.filtered_out,
     }
     run_mode = "APPLY" if args.apply else "DRY RUN"
