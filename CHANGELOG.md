@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.0
+
+- `--make-m3u` now also groups multi-disc GameCube/Wii releases in `.rvz`
+  (Dolphin's own compressed disc format), not just `.chd` for CD-based
+  systems -- same disc-tag convention (`(Disc 1)`, `(Disc 2)`), same
+  grouping/ordering/ambiguity-detection logic. Each release's disc files
+  move into a hidden folder named after their own format (`.chd/` or
+  `.rvz/`) rather than a single fixed `.chd/` folder, so the two formats
+  never collide; discs of different formats never group into the same
+  release even if title and tags otherwise match exactly, since that
+  can't be a real release. `--isolate-imports` follows along automatically
+  -- it already didn't assume a fixed hidden-folder name for the disc
+  files it moves alongside an `.m3u` playlist, and now checks every known
+  format's hidden folder rather than just one.
+
+  One caveat worth knowing: unlike the RetroArch cores this feature
+  originally targeted, Dolphin's automatic disc-swap on `.m3u` is an
+  opt-in setting (off by default) rather than always-on core behavior --
+  enable it in Dolphin's own settings for the same single-entry, auto-swap
+  experience CD-based systems already get.
+
 ## 1.7.0
 
 - Added `--isolate-imports`: moves every title with no `USA`- or
