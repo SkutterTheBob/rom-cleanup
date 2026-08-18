@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -481,6 +481,29 @@ def resolve_filter_file(roms_dir, filter_file_arg):
     return parsed, filter_path
 
 
+def walk_excluding_dup_dir(roms_dir, dup_dir):
+    """os.walk(roms_dir), never descending into dup_dir.
+
+    Every whole-tree scan in the tool needs this: dup_dir holds content a
+    prior run already decided doesn't belong in the active library
+    (duplicates, BIOS, proto/beta, redundant raw disc images, rejects --
+    see plan_duplicate_scan). Without this exclusion, an operation that
+    scans the whole tree treats that quarantined content as live library
+    content again -- e.g. --convert-to-chd converting a .cue sitting in
+    .duplicates/Redundant-Raw-Disc/ and placing a brand-new .chd back in
+    roms_dir, silently resurrecting a release a prior scan had already
+    rejected.
+
+    dup_dir must already be an absolute path (every caller in this tool
+    computes it that way from the start).
+    """
+    for root, dirs, files in os.walk(roms_dir):
+        dirs[:] = [d for d in dirs if os.path.join(root, d) != dup_dir]
+        if os.path.abspath(root) == dup_dir:
+            continue
+        yield root, dirs, files
+
+
 def unique_dest_path(dest_dir, filename, also_avoid=None):
     """Avoid collisions when moving files with the same name into duplicates/.
 
@@ -627,14 +650,15 @@ GAMELIST_GAME_BLOCK_RE = re.compile(r"<game\b[^>]*>.*?</game>", re.DOTALL | re.I
 GAMELIST_BACKUP_FILENAME = ".rom-cleanup-gamelist-xml.bak"
 
 
-def find_gamelists(roms_dir):
+def find_gamelists(roms_dir, dup_dir):
     """Recursively find every gamelist.xml under roms_dir -- covers both
     pointing this at a single console folder (gamelist.xml directly inside)
     and at a top-level ROMs folder containing one console subfolder per
-    system, each with its own gamelist.xml.
+    system, each with its own gamelist.xml. Never descends into dup_dir
+    (see walk_excluding_dup_dir).
     """
     found = []
-    for root, dirs, files in os.walk(roms_dir):
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
         for fname in files:
             if fname.lower() == GAMELIST_FILENAME:
                 found.append(os.path.join(root, fname))
@@ -696,7 +720,7 @@ def plan_gamelist_clean(path):
     return matches, cleaned
 
 
-def gamelist_clean(roms_dir, apply):
+def gamelist_clean(roms_dir, dup_dir, apply):
     """Find every gamelist.xml under roms_dir and remove <game> entries
     tagged with the ES-DE "notgame" marker, so libretro core setup/config
     entries don't show up as playable games. Returns (files_changed,
@@ -706,7 +730,7 @@ def gamelist_clean(roms_dir, apply):
     a hidden ".rom-cleanup-gamelist-xml.bak" next to it (overwritten on each re-run, so
     it only ever holds the most recent original).
     """
-    gamelists = find_gamelists(roms_dir)
+    gamelists = find_gamelists(roms_dir, dup_dir)
     if not gamelists:
         print("No {0} files found under {1}.".format(GAMELIST_FILENAME, roms_dir))
         return 0, 0
@@ -763,10 +787,15 @@ CUE_EXTENSION = ".cue"
 CHD_EXTENSION = ".chd"
 
 
-def find_cue_files(roms_dir):
-    """Recursively find every .cue file under roms_dir."""
+def find_cue_files(roms_dir, dup_dir):
+    """Recursively find every .cue file under roms_dir. Never descends
+    into dup_dir (see walk_excluding_dup_dir) -- a .cue sitting there was
+    already routed away as a duplicate or redundant-alongside-its-chd
+    leftover by a prior scan, not something to convert and place back
+    into roms_dir as a new .chd.
+    """
     found = []
-    for root, dirs, files in os.walk(roms_dir):
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
         for fname in files:
             if fname.lower().endswith(CUE_EXTENSION):
                 found.append(os.path.join(root, fname))
@@ -842,7 +871,7 @@ def find_chdman(chdman_path=None):
     return shutil.which("chdman")
 
 
-def plan_chd_conversion(roms_dir):
+def plan_chd_conversion(roms_dir, dup_dir):
     """Find every .cue file under roms_dir and work out, for each, whether
     it still needs converting and where the resulting .chd should end up:
     directly alongside the .cue if it's already sitting right in roms_dir,
@@ -867,7 +896,7 @@ def plan_chd_conversion(roms_dir):
     already_done = []
     reserved = set()
 
-    for cue_path in find_cue_files(roms_dir):
+    for cue_path in find_cue_files(roms_dir, dup_dir):
         cue_dir = os.path.dirname(cue_path)
         chd_name = os.path.splitext(os.path.basename(cue_path))[0] + CHD_EXTENSION
         needs_move = os.path.abspath(cue_dir) != os.path.abspath(roms_dir)
@@ -886,7 +915,7 @@ def plan_chd_conversion(roms_dir):
     return to_convert, already_done
 
 
-def convert_to_chd(roms_dir, apply, chdman_path=None):
+def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
     """Find every .cue file under roms_dir, convert it to .chd via
     'chdman createcd', and move the result up into roms_dir if it wasn't
     already sitting directly there. Returns (converted, skipped, errors).
@@ -917,7 +946,7 @@ def convert_to_chd(roms_dir, apply, chdman_path=None):
               file=sys.stderr)
         sys.exit(1)
 
-    to_convert, already_done = plan_chd_conversion(roms_dir)
+    to_convert, already_done = plan_chd_conversion(roms_dir, dup_dir)
     if not to_convert and not already_done:
         print("No {0} files found under {1}.".format(CUE_EXTENSION, roms_dir))
         return 0, 0, 0
@@ -1035,19 +1064,20 @@ def parse_disc_number(tag):
     return int(m.group(1)) if m else None
 
 
-def find_disc_files(roms_dir, extensions):
+def find_disc_files(roms_dir, dup_dir, extensions):
     """Recursively find every file under roms_dir whose extension is one
     of the given multi-disc container formats (see M3U_DISC_EXTENSIONS).
+    Never descends into dup_dir (see walk_excluding_dup_dir).
     """
     found = []
-    for root, dirs, files in os.walk(roms_dir):
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
         for fname in files:
             if os.path.splitext(fname)[1].lower() in extensions:
                 found.append(os.path.join(root, fname))
     return sorted(found)
 
 
-def plan_m3u_grouping(roms_dir):
+def plan_m3u_grouping(roms_dir, dup_dir):
     """Find every disc-tagged file in a supported multi-disc format (see
     M3U_DISC_EXTENSIONS -- e.g. "Game (USA) (Disc 1).chd" for a CD-based
     system, "Game (USA) (Disc 1).rvz" for GameCube/Wii) and group
@@ -1061,6 +1091,7 @@ def plan_m3u_grouping(roms_dir):
     folder entry for the same game. Different formats never group
     together even if title/tags otherwise match, since that shouldn't
     happen for a real release and would produce a nonsensical mixed group.
+    Never descends into dup_dir (see walk_excluding_dup_dir).
 
     A lone disc-tagged file with no siblings sharing its title/tags/format
     (only "Disc 1" ever found, no "Disc 2") is left alone -- nothing to
@@ -1090,7 +1121,7 @@ def plan_m3u_grouping(roms_dir):
     # (title_key, tags_key, ext) -> [(disc_num, disc_path, title, non_disc_tags), ...]
     groups = defaultdict(list)
 
-    for disc_path in find_disc_files(roms_dir, M3U_DISC_EXTENSIONS):
+    for disc_path in find_disc_files(roms_dir, dup_dir, M3U_DISC_EXTENSIONS):
         ext = os.path.splitext(disc_path)[1].lower()
         stem = os.path.splitext(os.path.basename(disc_path))[0]
         title, tags = extract_tags(stem)
@@ -1160,7 +1191,7 @@ def plan_m3u_grouping(roms_dir):
     return to_group, already_done, ambiguous
 
 
-def make_m3u_playlists(roms_dir, apply):
+def make_m3u_playlists(roms_dir, dup_dir, apply):
     """Print (and, if apply, perform) the grouping plan from
     plan_m3u_grouping: move each multi-disc release's disc files into its
     own subfolder under a hidden folder in roms_dir named after that
@@ -1176,7 +1207,7 @@ def make_m3u_playlists(roms_dir, apply):
     Any source folder left empty by the move is cleaned up (see
     remove_now_empty_dirs), same as the normal scan's --apply step.
     """
-    to_group, already_done, ambiguous = plan_m3u_grouping(roms_dir)
+    to_group, already_done, ambiguous = plan_m3u_grouping(roms_dir, dup_dir)
 
     if not to_group and not already_done and not ambiguous:
         print("No multi-disc {0} releases found under {1}.".format(
@@ -1725,11 +1756,7 @@ def scan_rom_files(roms_dir, dup_dir, extensions, blacklist_titles, whitelist_ti
     whitelist_hits = defaultdict(int)   # title_key -> files processed (title-level)
     reject_hits = defaultdict(int)      # filter line -> files rejected
 
-    for root, dirs, files in os.walk(roms_dir):
-        # never descend into the duplicates folder itself
-        dirs[:] = [d for d in dirs if os.path.join(root, d) != dup_dir]
-        if os.path.abspath(root) == dup_dir:
-            continue
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
         for fname in files:
             fpath = os.path.join(root, fname)
             stem, ext = os.path.splitext(fname)
@@ -2244,15 +2271,15 @@ def main():
         return
 
     if args.gamelist_clean:
-        gamelist_clean(roms_dir, args.apply)
+        gamelist_clean(roms_dir, dup_dir, args.apply)
         return
 
     if args.convert_to_chd:
-        convert_to_chd(roms_dir, args.apply, args.chdman_path)
+        convert_to_chd(roms_dir, dup_dir, args.apply, args.chdman_path)
         return
 
     if args.make_m3u:
-        make_m3u_playlists(roms_dir, args.apply)
+        make_m3u_playlists(roms_dir, dup_dir, args.apply)
         return
 
     if args.isolate_imports:

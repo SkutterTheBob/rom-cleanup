@@ -21,6 +21,24 @@
   enable it in Dolphin's own settings for the same single-entry, auto-swap
   experience CD-based systems already get.
 
+## 1.8.1
+
+- Fixed a data-integrity bug: `--convert-to-chd`, `--make-m3u`, and
+  `--gamelist-clean` all scanned the entire `roms_dir` tree with no
+  exclusion for `.duplicates/` -- unlike the normal duplicate scan, which
+  already skipped it. In practice this meant a `.cue` a prior scan had
+  already routed into `.duplicates/Redundant-Raw-Disc/` (because a `.chd`
+  already existed for that release) or `.duplicates/` outright (a release
+  that lost its duplicate comparison) got treated as live library content
+  again: `--convert-to-chd` would convert it and place a brand-new `.chd`
+  back in `roms_dir`, silently resurrecting a release the tool had
+  already decided didn't belong in the active library. Introduced a
+  shared `walk_excluding_dup_dir()` helper (the normal scan's own
+  dup_dir-skipping logic, factored out) and applied it everywhere the
+  tool walks the whole tree, so every standalone operation now agrees
+  with the normal scan about what counts as "not part of the active
+  library".
+
 ## 1.7.0
 
 - Added `--isolate-imports`: moves every title with no `USA`- or
