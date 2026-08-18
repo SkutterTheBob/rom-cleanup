@@ -322,6 +322,59 @@ def test_plan_m3u_grouping_groups_multi_disc_release(tmp_path):
     assert all(needs_move for _, _, needs_move in discs)
 
 
+def test_plan_m3u_grouping_groups_rvz_releases_under_their_own_hidden_folder(tmp_path):
+    """GameCube/Wii discs (.rvz, via Dolphin) group the same way CHD discs
+    do, but land under their own ".rvz/" hidden folder, not ".chd/".
+    """
+    touch(tmp_path / "Baten Kaitos (USA) (Disc 1).rvz")
+    touch(tmp_path / "Baten Kaitos (USA) (Disc 2).rvz")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert already_done == []
+    assert ambiguous == []
+    assert len(to_group) == 1
+    hidden_dir_path, m3u_path, discs = to_group[0]
+    assert hidden_dir_path == str(tmp_path / ".rvz" / "Baten Kaitos (USA)")
+    assert m3u_path == str(tmp_path / "Baten Kaitos (USA).m3u")
+    assert [os.path.basename(d[1]) for d in discs] == [
+        "Baten Kaitos (USA) (Disc 1).rvz", "Baten Kaitos (USA) (Disc 2).rvz"]
+
+
+def test_plan_m3u_grouping_does_not_cross_formats(tmp_path):
+    """A same-titled, same-tagged .chd and .rvz pair must never be grouped
+    into one release -- that would produce a nonsensical mixed-format .m3u.
+    Each is a lone disc in its own format, so neither groups at all.
+    """
+    touch(tmp_path / "Game (USA) (Disc 1).chd")
+    touch(tmp_path / "Game (USA) (Disc 1).rvz")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+
+    assert to_group == []
+    assert ambiguous == []
+
+
+def test_make_m3u_apply_groups_rvz_discs_and_writes_working_playlist(tmp_path):
+    touch(tmp_path / "Baten Kaitos (USA) (Disc 1).rvz")
+    touch(tmp_path / "Baten Kaitos (USA) (Disc 2).rvz")
+
+    run_script(tmp_path, "--make-m3u", "--apply")
+
+    m3u_path = tmp_path / "Baten Kaitos (USA).m3u"
+    assert m3u_path.exists()
+    assert (tmp_path / ".rvz" / "Baten Kaitos (USA)"
+            / "Baten Kaitos (USA) (Disc 1).rvz").exists()
+    assert (tmp_path / ".rvz" / "Baten Kaitos (USA)"
+            / "Baten Kaitos (USA) (Disc 2).rvz").exists()
+    assert not (tmp_path / "Baten Kaitos (USA) (Disc 1).rvz").exists()
+
+    content = m3u_path.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        if line.strip():
+            assert (m3u_path.parent / line.strip()).exists(), line
+
+
 def test_plan_m3u_grouping_orders_discs_numerically_not_alphabetically(tmp_path):
     """Regression coverage: "Disc 10" must sort after "Disc 2", not before
     it as plain string sorting would produce.
@@ -579,7 +632,7 @@ def test_plan_isolate_imports_moves_whole_release_subfolder_as_one_unit(tmp_path
 
 
 def test_plan_isolate_imports_moves_m3u_with_its_hidden_disc_folder(tmp_path):
-    hidden_dir = tmp_path / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)"
+    hidden_dir = tmp_path / rc.CHD_EXTENSION / "SaGa CD (Japan)"
     touch(hidden_dir / "SaGa CD (Japan) (Disc 1).chd")
     touch(hidden_dir / "SaGa CD (Japan) (Disc 2).chd")
     (tmp_path / "SaGa CD (Japan).m3u").write_text(
@@ -595,7 +648,30 @@ def test_plan_isolate_imports_moves_m3u_with_its_hidden_disc_folder(tmp_path):
     assert str(hidden_dir) in srcs
     dests = {dest for _, dest in to_move}
     assert str(tmp_path / ".imports" / "SaGa CD (Japan).m3u") in dests
-    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)") in dests
+    assert str(tmp_path / ".imports" / rc.CHD_EXTENSION / "SaGa CD (Japan)") in dests
+
+
+def test_plan_isolate_imports_moves_rvz_m3u_with_its_own_hidden_disc_folder(tmp_path):
+    """The .m3u's own filename doesn't say which format its discs are in
+    -- plan_isolate_imports has to find the right one among every known
+    hidden-folder candidate (.chd/, .rvz/), not just assume .chd/.
+    """
+    hidden_dir = tmp_path / rc.RVZ_EXTENSION / "Baten Kaitos (Japan)"
+    touch(hidden_dir / "Baten Kaitos (Japan) (Disc 1).rvz")
+    touch(hidden_dir / "Baten Kaitos (Japan) (Disc 2).rvz")
+    (tmp_path / "Baten Kaitos (Japan).m3u").write_text(
+        ".rvz/Baten Kaitos (Japan)/Baten Kaitos (Japan) (Disc 1).rvz\n"
+        ".rvz/Baten Kaitos (Japan)/Baten Kaitos (Japan) (Disc 2).rvz\n", encoding="utf-8")
+
+    to_move, kept, imports, blocked, filtered_out = rc.plan_isolate_imports(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert imports == ["Baten Kaitos"]
+    dests = {dest for _, dest in to_move}
+    assert str(tmp_path / ".imports" / "Baten Kaitos (Japan).m3u") in dests
+    assert str(tmp_path / ".imports" / rc.RVZ_EXTENSION / "Baten Kaitos (Japan)") in dests
+    # never guesses the wrong format's hidden folder for a release that
+    # doesn't have one
+    assert not any(rc.CHD_EXTENSION in dest for dest in dests)
 
 
 def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path):
@@ -603,7 +679,7 @@ def test_plan_isolate_imports_blocks_m3u_collision_instead_of_renaming(tmp_path)
     collision -- that would desync the playlist's relative disc paths
     from the folder they actually live in. Blocked and reported instead.
     """
-    hidden_dir = tmp_path / rc.M3U_HIDDEN_DIR_NAME / "SaGa CD (Japan)"
+    hidden_dir = tmp_path / rc.CHD_EXTENSION / "SaGa CD (Japan)"
     touch(hidden_dir / "SaGa CD (Japan) (Disc 1).chd")
     (tmp_path / "SaGa CD (Japan).m3u").write_text(
         ".chd/SaGa CD (Japan)/SaGa CD (Japan) (Disc 1).chd\n", encoding="utf-8")
@@ -2603,7 +2679,7 @@ def test_plan_imports_dir_migration_descends_into_the_m3u_hidden_folder(tmp_path
     level deeper instead of merging, burying the discs the playlists point at.
     """
     touch(tmp_path / "Imports" / "CD Game (Japan).m3u")
-    touch(tmp_path / "Imports" / rc.M3U_HIDDEN_DIR_NAME / "CD Game (Japan)"
+    touch(tmp_path / "Imports" / rc.CHD_EXTENSION / "CD Game (Japan)"
           / "CD Game (Japan) (Disc 1).chd")
 
     moves, _legacy = rc.plan_imports_dir_migration(str(tmp_path))
@@ -2611,8 +2687,8 @@ def test_plan_imports_dir_migration_descends_into_the_m3u_hidden_folder(tmp_path
     dests = [d for _s, d in moves]
     assert str(tmp_path / ".imports" / "CD Game (Japan).m3u") in dests
     # the per-release folder moves, not the shared ".chd" folder itself
-    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME / "CD Game (Japan)") in dests
-    assert str(tmp_path / ".imports" / rc.M3U_HIDDEN_DIR_NAME) not in dests
+    assert str(tmp_path / ".imports" / rc.CHD_EXTENSION / "CD Game (Japan)") in dests
+    assert str(tmp_path / ".imports" / rc.CHD_EXTENSION) not in dests
 
 
 def test_plan_imports_dir_migration_avoids_collision_with_existing_entry(tmp_path):
@@ -2704,7 +2780,7 @@ def test_isolate_imports_moves_m3u_and_hidden_disc_folder_with_working_playlist(
     for line in content.splitlines():
         if line.strip():
             assert (m3u_path.parent / line.strip()).exists(), line
-    assert not (tmp_path / rc.M3U_HIDDEN_DIR_NAME).exists()
+    assert not (tmp_path / rc.CHD_EXTENSION).exists()
 
 
 def test_isolate_imports_and_make_m3u_cannot_combine(tmp_path):
