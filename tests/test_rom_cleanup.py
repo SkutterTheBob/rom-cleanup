@@ -207,10 +207,34 @@ def test_find_cue_files_recursive(tmp_path):
     touch(tmp_path / "sub" / "B.CUE")
     touch(tmp_path / "sub" / "C.bin")
 
-    found = rc.find_cue_files(str(tmp_path))
+    found = rc.find_cue_files(str(tmp_path), default_dup_dir(tmp_path))
 
     names = sorted(os.path.basename(f) for f in found)
     assert names == ["A.cue", "B.CUE"]
+
+
+def test_find_cue_files_ignores_duplicates_folder(tmp_path):
+    """A .cue sitting in .duplicates/ (or .duplicates/Redundant-Raw-Disc/)
+    was already routed away by a prior scan -- --convert-to-chd must never
+    resurrect it by converting it and placing a new .chd back in roms_dir.
+    """
+    touch(tmp_path / "Keeper.cue")
+    touch(tmp_path / ".duplicates" / "Loser.cue")
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Already Has A Chd.cue")
+
+    found = rc.find_cue_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    names = sorted(os.path.basename(f) for f in found)
+    assert names == ["Keeper.cue"]
+
+
+def test_plan_chd_conversion_ignores_duplicates_folder(tmp_path):
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Final Fantasy VIII (Disc 1).cue")
+
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_convert == []
+    assert already_done == []
 
 
 def test_find_chdman_resolves_override_path(tmp_path):
@@ -226,7 +250,7 @@ def test_find_chdman_returns_none_for_missing_override(tmp_path):
 def test_plan_chd_conversion_no_move_for_direct_cue(tmp_path):
     touch(tmp_path / "Game (USA).cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path))
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert len(to_convert) == 1
@@ -240,7 +264,7 @@ def test_plan_chd_conversion_moves_nested_cue(tmp_path):
     release_dir = tmp_path / "Some Game (USA)"
     touch(release_dir / "Some Game (USA).cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path))
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
 
     assert len(to_convert) == 1
     cue_path, working_chd_path, final_chd_path, needs_move = to_convert[0]
@@ -253,7 +277,7 @@ def test_plan_chd_conversion_skips_when_chd_already_exists(tmp_path):
     touch(tmp_path / "Game (USA).cue")
     touch(tmp_path / "Game (USA).chd")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path))
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_convert == []
     assert len(already_done) == 1
@@ -269,7 +293,7 @@ def test_plan_chd_conversion_skips_nested_cue_when_final_dest_already_exists(tmp
     touch(release_dir / "Some Game (USA).cue")
     touch(tmp_path / "Some Game (USA).chd")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path))
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_convert == []
     assert len(already_done) == 1
@@ -279,7 +303,7 @@ def test_plan_chd_conversion_handles_name_collision(tmp_path):
     touch(tmp_path / "A" / "Game.cue")
     touch(tmp_path / "B" / "Game.cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path))
+    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
 
     assert len(to_convert) == 2
     final_names = sorted(os.path.basename(t[2]) for t in to_convert)
@@ -308,7 +332,7 @@ def test_plan_m3u_grouping_groups_multi_disc_release(tmp_path):
     touch(tmp_path / "Game (USA) (Disc 1).chd")
     touch(tmp_path / "Game (USA) (Disc 2).chd")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert ambiguous == []
@@ -383,7 +407,7 @@ def test_plan_m3u_grouping_orders_discs_numerically_not_alphabetically(tmp_path)
     touch(tmp_path / "Game (USA) (Disc 2).chd")
     touch(tmp_path / "Game (USA) (Disc 10).chd")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert len(to_group) == 1
     _, _, discs = to_group[0]
@@ -391,10 +415,27 @@ def test_plan_m3u_grouping_orders_discs_numerically_not_alphabetically(tmp_path)
         "Game (USA) (Disc 1).chd", "Game (USA) (Disc 2).chd", "Game (USA) (Disc 10).chd"]
 
 
+def test_plan_m3u_grouping_ignores_duplicates_folder(tmp_path):
+    """A .chd sitting in .duplicates/ was already routed away by a prior
+    scan -- --make-m3u must never treat it as part of the active library.
+    """
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc"
+          / "Old Game (USA) (Disc 1).chd")
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc"
+          / "Old Game (USA) (Disc 2).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(
+        str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_group == []
+    assert already_done == []
+    assert ambiguous == []
+
+
 def test_plan_m3u_grouping_ignores_lone_disc(tmp_path):
     touch(tmp_path / "Only Disc (USA) (Disc 1).chd")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_group == []
     assert already_done == []
@@ -404,7 +445,7 @@ def test_plan_m3u_grouping_ignores_lone_disc(tmp_path):
 def test_plan_m3u_grouping_ignores_non_disc_releases(tmp_path):
     touch(tmp_path / "Single Disc Game (USA).chd")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_group == []
     assert already_done == []
@@ -414,7 +455,7 @@ def test_plan_m3u_grouping_flags_ambiguous_duplicate_disc_numbers(tmp_path):
     touch(tmp_path / "SetA" / "Game (USA) (Disc 1).chd")
     touch(tmp_path / "SetB" / "Game (USA) (Disc 1).chd")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_group == []
     assert len(ambiguous) == 1
@@ -432,7 +473,7 @@ def test_plan_m3u_grouping_detects_already_grouped(tmp_path):
         ".chd/Game (USA)/Game (USA) (Disc 1).chd\n.chd/Game (USA)/Game (USA) (Disc 2).chd\n",
         encoding="utf-8")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_group == []
     assert already_done == [str(hidden_dir)]
@@ -448,7 +489,7 @@ def test_plan_m3u_grouping_regroups_when_m3u_content_is_stale(tmp_path):
     (tmp_path / "Game (USA).m3u").write_text(
         ".chd/Game (USA)/Game (USA) (Disc 1).chd\n", encoding="utf-8")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert len(to_group) == 1
@@ -465,7 +506,7 @@ def test_plan_m3u_grouping_migrates_old_same_folder_layout(tmp_path):
     (old_folder / "Game (USA).m3u").write_text(
         "Game (USA) (Disc 1).chd\nGame (USA) (Disc 2).chd\n", encoding="utf-8")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert len(to_group) == 1
@@ -488,7 +529,7 @@ def test_plan_m3u_grouping_migrates_old_per_release_hidden_dir_layout(tmp_path):
         ".Game (USA)/Game (USA) (Disc 1).chd\n.Game (USA)/Game (USA) (Disc 2).chd\n",
         encoding="utf-8")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert len(to_group) == 1
@@ -2221,6 +2262,16 @@ def write_gamelist(path, content=GAMELIST_TEMPLATE):
     path.write_text(content, encoding="utf-8")
 
 
+def test_find_gamelists_ignores_duplicates_folder(tmp_path):
+    write_gamelist(tmp_path / "SNES" / "gamelist.xml")
+    write_gamelist(tmp_path / ".duplicates" / "gamelist.xml")
+
+    found = rc.find_gamelists(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert [os.path.relpath(f, tmp_path) for f in found] == [
+        os.path.join("SNES", "gamelist.xml")]
+
+
 def test_gamelist_clean_dry_run_does_not_modify_file(tmp_path):
     gamelist_path = tmp_path / "SNES" / "gamelist.xml"
     write_gamelist(gamelist_path)
@@ -2339,6 +2390,27 @@ def test_convert_to_chd_apply_converts_direct_cue(tmp_path):
     assert (console_dir / "Game (USA).chd").exists()
     assert (console_dir / "Game (USA).cue").exists()  # original left in place
     assert "Converted 1/1" in result.stdout
+
+
+def test_convert_to_chd_apply_never_resurrects_quarantined_cue(tmp_path):
+    """Reported bug: a .cue that a prior scan already routed into
+    .duplicates/Redundant-Raw-Disc/ (because a .chd already exists for
+    that release) must never be converted -- doing so silently
+    resurrects a release the tool had already decided didn't belong in
+    the active library, as a brand-new .chd sitting loose in roms_dir.
+    """
+    stub = write_chdman_stub(tmp_path)
+    touch(tmp_path / "Keeper (USA).chd")
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Loser (USA).cue")
+    touch(tmp_path / ".duplicates" / "Loser2 (USA).cue")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert "No .cue files found" in result.stdout
+    assert not (tmp_path / "Loser (USA).chd").exists()
+    assert not (tmp_path / "Loser2 (USA).chd").exists()
+    assert (tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Loser (USA).cue").exists()
+    assert (tmp_path / ".duplicates" / "Loser2 (USA).cue").exists()
 
 
 def test_convert_to_chd_moves_nested_cue_chd_to_console_root(tmp_path):
