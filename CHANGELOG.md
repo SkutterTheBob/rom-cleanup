@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.9.0
+
+- `--convert-to-chd` now also converts a standalone `.iso` (one not
+  already referenced by a `.cue` sheet as its data track), not just
+  `.cue`/`.bin` sets -- useful for CD-based systems where a single-track
+  dump commonly ships as a lone `.iso` with no cue sheet at all (PSX,
+  Saturn, Sega CD, PC-Engine CD, 3DO, ...). `chdman createcd` needs a
+  `.cue` even for one track, so one is synthesized on the fly right next
+  to the `.iso` and removed again afterward regardless of outcome.
+
+  Which CD track type the synthesized `.cue` declares -- `MODE2/2352` for
+  a raw sector dump (the usual shape for PSX and most CD-XA-derived
+  systems), or `MODE1/2048` for a plain ISO9660 data image -- is detected
+  from the file itself: its size, and for the raw case, the CD-ROM sync
+  pattern every raw sector begins with, not guessed from the `.iso`
+  extension alone. This identifies which of the two *shapes* the file
+  has, but can't distinguish finer raw-sector sub-modes some platforms
+  occasionally need; a `.iso` whose size doesn't cleanly match either
+  layout is left alone and flagged for manual review rather than guessed
+  at. An `.iso` already referenced by a `.cue` in the same folder is left
+  to that existing cue-conversion path, so it's never double-converted
+  into two competing `.chd` files for the same release.
+
+## 1.8.1
+
+- Fixed a data-integrity bug: `--convert-to-chd`, `--make-m3u`, and
+  `--gamelist-clean` all scanned the entire `roms_dir` tree with no
+  exclusion for `.duplicates/` -- unlike the normal duplicate scan, which
+  already skipped it. In practice this meant a `.cue` a prior scan had
+  already routed into `.duplicates/Redundant-Raw-Disc/` (because a `.chd`
+  already existed for that release) or `.duplicates/` outright (a release
+  that lost its duplicate comparison) got treated as live library content
+  again: `--convert-to-chd` would convert it and place a brand-new `.chd`
+  back in `roms_dir`, silently resurrecting a release the tool had
+  already decided didn't belong in the active library. Introduced a
+  shared `walk_excluding_dup_dir()` helper (the normal scan's own
+  dup_dir-skipping logic, factored out) and applied it everywhere the
+  tool walks the whole tree, so every standalone operation now agrees
+  with the normal scan about what counts as "not part of the active
+  library".
+
 ## 1.8.0
 
 - `--make-m3u` now also groups multi-disc GameCube/Wii releases in `.rvz`
@@ -20,24 +61,6 @@
   opt-in setting (off by default) rather than always-on core behavior --
   enable it in Dolphin's own settings for the same single-entry, auto-swap
   experience CD-based systems already get.
-
-## 1.8.1
-
-- Fixed a data-integrity bug: `--convert-to-chd`, `--make-m3u`, and
-  `--gamelist-clean` all scanned the entire `roms_dir` tree with no
-  exclusion for `.duplicates/` -- unlike the normal duplicate scan, which
-  already skipped it. In practice this meant a `.cue` a prior scan had
-  already routed into `.duplicates/Redundant-Raw-Disc/` (because a `.chd`
-  already existed for that release) or `.duplicates/` outright (a release
-  that lost its duplicate comparison) got treated as live library content
-  again: `--convert-to-chd` would convert it and place a brand-new `.chd`
-  back in `roms_dir`, silently resurrecting a release the tool had
-  already decided didn't belong in the active library. Introduced a
-  shared `walk_excluding_dup_dir()` helper (the normal scan's own
-  dup_dir-skipping logic, factored out) and applied it everywhere the
-  tool walks the whole tree, so every standalone operation now agrees
-  with the normal scan about what counts as "not part of the active
-  library".
 
 ## 1.7.0
 

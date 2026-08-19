@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -785,6 +785,36 @@ def gamelist_clean(roms_dir, dup_dir, apply):
 
 CUE_EXTENSION = ".cue"
 CHD_EXTENSION = ".chd"
+ISO_EXTENSION = ".iso"
+
+# CD track types a synthesized single-track .cue can declare for a
+# standalone .iso -- chdman's createcd needs a .cue even for one track,
+# so one gets generated on the fly rather than requiring the user to
+# hand-author one. Which of these is correct depends on how the .iso was
+# originally dumped, not on the file extension:
+#   MODE2/2352 -- a raw sector dump (every sector carries the CD-ROM sync
+#                 pattern) -- the standard choice for most CD-XA-derived
+#                 systems' single-data-track discs (PSX in particular).
+#   MODE1/2048 -- a plain ISO9660 data image with no raw sector wrapper,
+#                 one 2048-byte block of user data per sector.
+# This is a heuristic, not a certainty: it correctly identifies WHICH of
+# these two shapes the file has, but within the raw-sector case it can't
+# distinguish finer sub-modes some platforms occasionally need -- if a
+# specific title doesn't play right after conversion, that's the first
+# thing to check by hand.
+ISO_TRACK_MODE_RAW = "MODE2/2352"
+ISO_TRACK_MODE_DATA = "MODE1/2048"
+
+RAW_SECTOR_SIZE = 2352
+DATA_SECTOR_SIZE = 2048
+
+# The 12-byte sync pattern every raw CD-ROM sector begins with (Yellow
+# Book / ECMA-130) -- present in a raw 2352-byte sector dump, absent from
+# a plain 2048-byte ISO9660 image. This is what actually distinguishes
+# the two track types below; file size alone isn't enough; since a size
+# that happens to be a multiple of both 2352 and 2048 (any multiple of
+# 301,056 bytes) would otherwise be ambiguous.
+CD_SECTOR_SYNC_PATTERN = b"\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00"
 
 
 def find_cue_files(roms_dir, dup_dir):
@@ -860,6 +890,68 @@ def find_cue_case_mismatches(cue_path):
     return mismatches
 
 
+def find_lone_iso_files(roms_dir, dup_dir):
+    """Recursively find every standalone .iso under roms_dir that ISN'T
+    already referenced by a .cue sheet sitting in the same folder -- some
+    cue sheets name an .iso as their FILE line instead of a .bin, and
+    that .iso is already handled via the normal cue-conversion path, so
+    counting it again here would produce a second, redundant .chd for the
+    same release. Never descends into dup_dir (see walk_excluding_dup_dir).
+    """
+    isos_by_dir = defaultdict(list)
+    referenced_by_dir = defaultdict(set)
+
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
+        for fname in files:
+            lower = fname.lower()
+            if lower.endswith(ISO_EXTENSION):
+                isos_by_dir[root].append(fname)
+            elif lower.endswith(CUE_EXTENSION):
+                referenced_by_dir[root] |= set(
+                    parse_cue_file_references(os.path.join(root, fname)))
+
+    found = []
+    for root, names in isos_by_dir.items():
+        referenced = referenced_by_dir.get(root, set())
+        for fname in names:
+            if fname not in referenced:
+                found.append(os.path.join(root, fname))
+    return sorted(found)
+
+
+def detect_iso_track_mode(iso_path):
+    """Work out which CD track type a synthesized .cue should declare
+    for this standalone .iso, by inspecting the file itself rather than
+    guessing from its name or extension. See ISO_TRACK_MODE_RAW/_DATA.
+
+    Returns None if the file size doesn't cleanly divide into either
+    sector size, or divides by 2352 without the sync pattern to back it
+    up -- an unrecognized layout is left for a human to sort out rather
+    than guessed at.
+    """
+    size = os.path.getsize(iso_path)
+    if size > 0 and size % RAW_SECTOR_SIZE == 0:
+        with open(iso_path, "rb") as f:
+            header = f.read(len(CD_SECTOR_SYNC_PATTERN))
+        if header == CD_SECTOR_SYNC_PATTERN:
+            return ISO_TRACK_MODE_RAW
+    if size > 0 and size % DATA_SECTOR_SIZE == 0:
+        return ISO_TRACK_MODE_DATA
+    return None
+
+
+def synthesize_cue_text(iso_filename, track_mode):
+    """Build the text of a minimal single-track .cue sheet for a
+    standalone .iso, so it can go through chdman's createcd the same way
+    a real .cue does -- createcd needs a .cue even for a single track.
+    """
+    return (
+        'FILE "{0}" BINARY\n'
+        '  TRACK 01 {1}\n'
+        '    INDEX 01 00:00:00\n'
+    ).format(iso_filename, track_mode)
+
+
 def find_chdman(chdman_path=None):
     """Locate the chdman executable (ships with mame-tools / MAME). Checks
     an explicit override first (also resolved against PATH, so a bare
@@ -871,67 +963,113 @@ def find_chdman(chdman_path=None):
     return shutil.which("chdman")
 
 
-def plan_chd_conversion(roms_dir, dup_dir):
-    """Find every .cue file under roms_dir and work out, for each, whether
-    it still needs converting and where the resulting .chd should end up:
-    directly alongside the .cue if it's already sitting right in roms_dir,
-    or moved up into roms_dir itself otherwise (same "flatten up to
+def _plan_one_conversion(source_path, roms_dir, reserved):
+    """Shared destination bookkeeping for one convertible source file
+    (.cue or .iso): work out where its .chd should end up -- directly
+    alongside the source if it's already sitting right in roms_dir, or
+    moved up into roms_dir itself otherwise (same "flatten up to
     roms_dir" convention as --flatten-alpha-dirs) -- so a CD release that
-    lives in its own subfolder (e.g. for a multi-track bin/cue set) ends
-    up with its .chd sitting flat alongside the rest of the roms.
+    lives in its own subfolder ends up with its .chd sitting flat
+    alongside the rest of the roms.
 
-    A .cue is skipped (treated as already done) if a .chd with the same
-    name already exists at that destination -- makes repeated runs cheap
-    and resumable instead of reconverting everything every time.
+    Returns (working_chd_path, final_chd_path, needs_move, already_done).
+    already_done is True if a .chd with the matching name already exists
+    at the destination -- makes repeated runs cheap and resumable instead
+    of reconverting everything every time; working/final_chd_path are
+    both None in that case.
+    """
+    source_dir = os.path.dirname(source_path)
+    chd_name = os.path.splitext(os.path.basename(source_path))[0] + CHD_EXTENSION
+    needs_move = os.path.abspath(source_dir) != os.path.abspath(roms_dir)
+    dest_dir = roms_dir if needs_move else source_dir
 
-    Returns (to_convert, already_done):
-        to_convert:   [(cue_path, working_chd_path, final_chd_path, needs_move), ...]
-                      working_chd_path is where chdman writes the .chd
-                      (next to the .cue); final_chd_path is where it ends
-                      up after the move (same as working_chd_path when no
-                      move is needed).
-        already_done: [cue_path, ...]
+    if os.path.exists(os.path.join(dest_dir, chd_name)):
+        return None, None, needs_move, True
+
+    working_chd_path = os.path.join(source_dir, chd_name)
+    final_chd_path = (unique_dest_path(roms_dir, chd_name, also_avoid=reserved)
+                       if needs_move else working_chd_path)
+    reserved.add(final_chd_path)
+    return working_chd_path, final_chd_path, needs_move, False
+
+
+def plan_chd_conversion(roms_dir, dup_dir):
+    """Find every .cue file, plus every standalone .iso not already
+    claimed by one (see find_lone_iso_files), under roms_dir and work out
+    which still need converting and where each resulting .chd should end
+    up (see _plan_one_conversion).
+
+    Returns (to_convert, already_done, unrecognized_isos):
+        to_convert:   [(source_path, working_chd_path, final_chd_path,
+                        needs_move, source_kind, track_mode), ...]
+                      source_kind is "cue" or "iso". track_mode is the
+                      ISO_TRACK_MODE_RAW/_DATA the synthesized .cue will
+                      declare for an "iso" entry (see
+                      detect_iso_track_mode), always None for a "cue"
+                      entry (a real .cue already declares its own track
+                      types).
+        already_done: [source_path, ...]
+        unrecognized_isos: [iso_path, ...] -- a standalone .iso whose
+                      sector layout couldn't be determined, left
+                      untouched rather than guessed at.
     """
     to_convert = []
     already_done = []
+    unrecognized_isos = []
     reserved = set()
 
     for cue_path in find_cue_files(roms_dir, dup_dir):
-        cue_dir = os.path.dirname(cue_path)
-        chd_name = os.path.splitext(os.path.basename(cue_path))[0] + CHD_EXTENSION
-        needs_move = os.path.abspath(cue_dir) != os.path.abspath(roms_dir)
-        dest_dir = roms_dir if needs_move else cue_dir
-
-        if os.path.exists(os.path.join(dest_dir, chd_name)):
+        working_chd_path, final_chd_path, needs_move, done = _plan_one_conversion(
+            cue_path, roms_dir, reserved)
+        if done:
             already_done.append(cue_path)
             continue
+        to_convert.append((cue_path, working_chd_path, final_chd_path, needs_move, "cue", None))
 
-        working_chd_path = os.path.join(cue_dir, chd_name)
-        final_chd_path = (unique_dest_path(roms_dir, chd_name, also_avoid=reserved)
-                           if needs_move else working_chd_path)
-        reserved.add(final_chd_path)
-        to_convert.append((cue_path, working_chd_path, final_chd_path, needs_move))
+    for iso_path in find_lone_iso_files(roms_dir, dup_dir):
+        track_mode = detect_iso_track_mode(iso_path)
+        if track_mode is None:
+            unrecognized_isos.append(iso_path)
+            continue
 
-    return to_convert, already_done
+        working_chd_path, final_chd_path, needs_move, done = _plan_one_conversion(
+            iso_path, roms_dir, reserved)
+        if done:
+            already_done.append(iso_path)
+            continue
+        to_convert.append((iso_path, working_chd_path, final_chd_path, needs_move, "iso", track_mode))
+
+    return to_convert, already_done, unrecognized_isos
 
 
 def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
-    """Find every .cue file under roms_dir, convert it to .chd via
-    'chdman createcd', and move the result up into roms_dir if it wasn't
-    already sitting directly there. Returns (converted, skipped, errors).
+    """Find every .cue file, plus every standalone .iso not already
+    claimed by one, under roms_dir, convert each to .chd via 'chdman
+    createcd', and move the result up into roms_dir if it wasn't already
+    sitting directly there. Returns (converted, skipped, errors).
 
-    Before handing a .cue to chdman, checks every file it references
-    actually exists under that exact name (see find_cue_case_mismatches)
-    -- a common problem on case-sensitive filesystems is a cue sheet
-    written on Windows referencing e.g. "GAME.BIN" when the real file on
-    disk is "game.bin". When there's exactly one case-insensitive match,
-    it's renamed into place to match what the cue expects (only when
-    apply is True); when it's ambiguous or missing entirely, that .cue is
-    reported as blocked and skipped rather than being handed to chdman,
-    whose own error message for this case doesn't clearly name the actual
-    missing file.
+    A standalone .iso has no .cue of its own -- createcd needs one even
+    for a single track, so one is synthesized on the fly right next to
+    the .iso (see synthesize_cue_text), handed to chdman in its place,
+    and removed again afterward regardless of outcome. Which CD track
+    type it declares is detected from the .iso itself (see
+    detect_iso_track_mode); an .iso whose sector layout can't be
+    determined is left alone and reported rather than guessed at.
 
-    The original .bin/.cue files are left in place -- run the normal
+    Before handing a real .cue to chdman, checks every file it
+    references actually exists under that exact name (see
+    find_cue_case_mismatches) -- a common problem on case-sensitive
+    filesystems is a cue sheet written on Windows referencing e.g.
+    "GAME.BIN" when the real file on disk is "game.bin". When there's
+    exactly one case-insensitive match, it's renamed into place to match
+    what the cue expects (only when apply is True); when it's ambiguous
+    or missing entirely, that .cue is reported as blocked and skipped
+    rather than being handed to chdman, whose own error message for this
+    case doesn't clearly name the actual missing file. This check doesn't
+    apply to a synthesized .cue -- it's written with the .iso's own exact
+    on-disk name, so it can't mismatch.
+
+    The original .bin/.cue/.iso files are left in place -- run the normal
     duplicate scan with --apply afterward and it will automatically route
     them into .duplicates/Redundant-Raw-Disc/, since it already detects a
     .chd alongside raw disc files for the same release.
@@ -946,65 +1084,95 @@ def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
               file=sys.stderr)
         sys.exit(1)
 
-    to_convert, already_done = plan_chd_conversion(roms_dir, dup_dir)
-    if not to_convert and not already_done:
-        print("No {0} files found under {1}.".format(CUE_EXTENSION, roms_dir))
+    to_convert, already_done, unrecognized_isos = plan_chd_conversion(roms_dir, dup_dir)
+    if not to_convert and not already_done and not unrecognized_isos:
+        print("No {0}/{1} files found under {2}.".format(CUE_EXTENSION, ISO_EXTENSION, roms_dir))
         return 0, 0, 0
 
-    for cue_path in already_done:
-        print("[SKIP] {0}  (already converted)".format(os.path.relpath(cue_path, roms_dir)))
+    for source_path in already_done:
+        print("[SKIP] {0}  (already converted)".format(os.path.relpath(source_path, roms_dir)))
+
+    for iso_path in unrecognized_isos:
+        print("\n  Warning: {0!r} -- size doesn't match a recognized CD sector "
+              "layout ({1}-byte raw or {2}-byte data sectors), skipping, needs "
+              "manual review.".format(
+                  os.path.relpath(iso_path, roms_dir), RAW_SECTOR_SIZE, DATA_SECTOR_SIZE),
+              file=sys.stderr)
 
     convertible = []
-    blocked = 0
+    blocked = len(unrecognized_isos)
 
-    for cue_path, working_chd_path, final_chd_path, needs_move in to_convert:
-        print("[CONVERT] {0}{1}".format(
-            os.path.relpath(cue_path, roms_dir),
-            "  ->  {0}".format(os.path.relpath(final_chd_path, roms_dir)) if needs_move else ""))
+    for source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode in to_convert:
+        note = "  (synthesizing {0} cue sheet)".format(track_mode) if source_kind == "iso" else ""
+        print("[CONVERT] {0}{1}{2}".format(
+            os.path.relpath(source_path, roms_dir),
+            "  ->  {0}".format(os.path.relpath(final_chd_path, roms_dir)) if needs_move else "",
+            note))
 
-        mismatches = find_cue_case_mismatches(cue_path)
-        cue_dir = os.path.dirname(cue_path)
-        rename_failed = False
+        if source_kind == "cue":
+            mismatches = find_cue_case_mismatches(source_path)
+            source_dir = os.path.dirname(source_path)
+            rename_failed = False
 
-        for referenced, actual in mismatches:
-            if actual is None:
-                print("  ERROR: references '{0}', which doesn't exist (even "
-                      "case-insensitively) in its folder.".format(referenced),
-                      file=sys.stderr)
+            for referenced, actual in mismatches:
+                if actual is None:
+                    print("  ERROR: references '{0}', which doesn't exist (even "
+                          "case-insensitively) in its folder.".format(referenced),
+                          file=sys.stderr)
+                    continue
+                verb = "Renamed" if apply else "Would rename"
+                print("  [CASE-FIX] {0} '{1}' -> '{2}' (to match what the .cue "
+                      "references)".format(verb, actual, referenced))
+                if apply:
+                    try:
+                        os.rename(os.path.join(source_dir, actual), os.path.join(source_dir, referenced))
+                    except OSError as e:
+                        rename_failed = True
+                        print("    ERROR: rename failed: {0}".format(e), file=sys.stderr)
+
+            if any(actual is None for _, actual in mismatches) or rename_failed:
+                blocked += 1
                 continue
-            verb = "Renamed" if apply else "Would rename"
-            print("  [CASE-FIX] {0} '{1}' -> '{2}' (to match what the .cue "
-                  "references)".format(verb, actual, referenced))
-            if apply:
-                try:
-                    os.rename(os.path.join(cue_dir, actual), os.path.join(cue_dir, referenced))
-                except OSError as e:
-                    rename_failed = True
-                    print("    ERROR: rename failed: {0}".format(e), file=sys.stderr)
 
-        if any(actual is None for _, actual in mismatches) or rename_failed:
-            blocked += 1
-            continue
-
-        convertible.append((cue_path, working_chd_path, final_chd_path, needs_move))
+        convertible.append(
+            (source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode))
 
     if not apply:
-        print("\nDRY RUN -- would convert {0} .cue file(s) to .chd ({1} "
-              "already converted, skipped{2}). Re-run with --apply to do it.".format(
+        print("\nDRY RUN -- would convert {0} file(s) to .chd ({1} already "
+              "converted, skipped{2}). Re-run with --apply to do it.".format(
                   len(convertible), len(already_done),
-                  "; {0} blocked by unresolved file reference(s)".format(blocked) if blocked else ""))
+                  "; {0} blocked, needs manual review".format(blocked) if blocked else ""))
         return len(convertible), len(already_done), blocked
 
     converted = 0
     errors = blocked
-    for cue_path, working_chd_path, final_chd_path, needs_move in convertible:
-        result = subprocess.run(
-            [chdman, "createcd", "-i", cue_path, "-o", working_chd_path, "-f"],
-            capture_output=True, text=True)
+    for source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode in convertible:
+        synthesized_cue_path = None
+        convert_input = source_path
+        if source_kind == "iso":
+            synthesized_cue_path = os.path.splitext(source_path)[0] + CUE_EXTENSION
+            cue_text = synthesize_cue_text(os.path.basename(source_path), track_mode)
+            with open(synthesized_cue_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(cue_text)
+            convert_input = synthesized_cue_path
+
+        try:
+            result = subprocess.run(
+                [chdman, "createcd", "-i", convert_input, "-o", working_chd_path, "-f"],
+                capture_output=True, text=True)
+        finally:
+            if synthesized_cue_path is not None:
+                try:
+                    os.remove(synthesized_cue_path)
+                except OSError as e:
+                    print("  Warning: could not remove synthesized cue sheet {0}: "
+                          "{1}".format(os.path.relpath(synthesized_cue_path, roms_dir), e),
+                          file=sys.stderr)
+
         if result.returncode != 0:
             errors += 1
             print("  ERROR converting {0}: {1}".format(
-                os.path.relpath(cue_path, roms_dir),
+                os.path.relpath(source_path, roms_dir),
                 (result.stderr or result.stdout).strip()), file=sys.stderr)
             continue
 
@@ -1013,13 +1181,13 @@ def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
 
         converted += 1
 
-    print("\nConverted {0}/{1} .cue file(s) to .chd ({2} already converted, "
+    print("\nConverted {0}/{1} file(s) to .chd ({2} already converted, "
           "skipped{3}).".format(
               converted, len(to_convert), len(already_done),
               "; {0} error(s)".format(errors) if errors else ""))
     if converted:
         print("Run the normal duplicate scan with --apply to route the now-"
-              "redundant .bin/.cue files into .duplicates/Redundant-Raw-Disc/.")
+              "redundant .bin/.cue/.iso files into .duplicates/Redundant-Raw-Disc/.")
 
     return converted, len(already_done), errors
 
@@ -2183,13 +2351,20 @@ def main():
                                   GAMELIST_FILENAME, GAMELIST_NOTGAME_MARKER,
                                   GAMELIST_BACKUP_FILENAME))
     parser.add_argument("--convert-to-chd", action="store_true",
-                         help="Find every .cue file under roms_dir, convert it to "
-                              ".chd via 'chdman createcd' (requires chdman, which "
-                              "ships with mame-tools, on PATH -- or pass "
-                              "--chdman-path), and if the .cue wasn't already "
-                              "directly in roms_dir, move the resulting .chd up "
-                              "into roms_dir itself. Skips .cue files already "
-                              "converted. Original .bin/.cue files are left in "
+                         help="Find every .cue file, plus every standalone .iso "
+                              "not already referenced by one, under roms_dir, and "
+                              "convert each to .chd via 'chdman createcd' (requires "
+                              "chdman, which ships with mame-tools, on PATH -- or "
+                              "pass --chdman-path), moving the result up into "
+                              "roms_dir itself if it wasn't already directly there. "
+                              "A standalone .iso gets a minimal single-track .cue "
+                              "synthesized for it on the fly (removed again "
+                              "afterward) -- its CD track type (raw-sector vs plain "
+                              "data image) is detected from the file itself, not "
+                              "guessed from the extension; a .iso whose sector "
+                              "layout can't be determined is left alone and "
+                              "flagged for manual review. Skips files already "
+                              "converted. Original .bin/.cue/.iso files are left in "
                               "place -- run the normal scan with --apply "
                               "afterward to route them into "
                               ".duplicates/Redundant-Raw-Disc/. Respects --apply "

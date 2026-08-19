@@ -228,13 +228,157 @@ def test_find_cue_files_ignores_duplicates_folder(tmp_path):
     assert names == ["Keeper.cue"]
 
 
-def test_plan_chd_conversion_ignores_duplicates_folder(tmp_path):
-    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Final Fantasy VIII (Disc 1).cue")
+def write_raw_sector_iso(path, num_sectors=1):
+    """Build a fixture .iso shaped like a real raw-sector CD dump: each
+    2352-byte sector begins with the CD-ROM sync pattern, matching what
+    detect_iso_track_mode actually looks for -- not just a file that
+    happens to be the right size.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sector = rc.CD_SECTOR_SYNC_PATTERN + b"\xAB" * (rc.RAW_SECTOR_SIZE - len(rc.CD_SECTOR_SYNC_PATTERN))
+    path.write_bytes(sector * num_sectors)
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+
+def write_data_sector_iso(path, num_sectors=1):
+    """Build a fixture .iso shaped like a plain ISO9660 data image: no
+    raw-sector sync pattern, just a size that's a clean multiple of the
+    2048-byte data sector size.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xCD" * (rc.DATA_SECTOR_SIZE * num_sectors))
+
+
+def test_detect_iso_track_mode_raw_sector_dump(tmp_path):
+    iso_path = tmp_path / "Game (USA).iso"
+    write_raw_sector_iso(iso_path, num_sectors=2)
+
+    assert rc.detect_iso_track_mode(str(iso_path)) == rc.ISO_TRACK_MODE_RAW
+
+
+def test_detect_iso_track_mode_plain_data_image(tmp_path):
+    iso_path = tmp_path / "Game (USA).iso"
+    write_data_sector_iso(iso_path, num_sectors=3)
+
+    assert rc.detect_iso_track_mode(str(iso_path)) == rc.ISO_TRACK_MODE_DATA
+
+
+def test_detect_iso_track_mode_unrecognized_size(tmp_path):
+    iso_path = tmp_path / "Weird.iso"
+    iso_path.write_bytes(b"\x00" * 1000)  # not a multiple of 2352 or 2048
+
+    assert rc.detect_iso_track_mode(str(iso_path)) is None
+
+
+def test_detect_iso_track_mode_empty_file_is_unrecognized(tmp_path):
+    iso_path = tmp_path / "Empty.iso"
+    iso_path.write_bytes(b"")
+
+    assert rc.detect_iso_track_mode(str(iso_path)) is None
+
+
+def test_detect_iso_track_mode_size_divisible_by_both_falls_back_to_data(tmp_path):
+    """A size that happens to divide evenly by both 2352 and 2048 (any
+    multiple of 301,056 bytes) is only RAW if the sync pattern actually
+    backs it up -- otherwise it's correctly read as a plain data image,
+    not misdetected as raw just because the size is ambiguous.
+    """
+    size = rc.RAW_SECTOR_SIZE * rc.DATA_SECTOR_SIZE // 16  # 301,056 -- divides both
+    assert size % rc.RAW_SECTOR_SIZE == 0
+    assert size % rc.DATA_SECTOR_SIZE == 0
+    iso_path = tmp_path / "Coincidence.iso"
+    iso_path.write_bytes(b"\xEE" * size)  # no sync pattern present
+
+    assert rc.detect_iso_track_mode(str(iso_path)) == rc.ISO_TRACK_MODE_DATA
+
+
+def test_synthesize_cue_text_matches_expected_single_track_layout():
+    text = rc.synthesize_cue_text("Game (USA).iso", rc.ISO_TRACK_MODE_RAW)
+
+    assert text == (
+        'FILE "Game (USA).iso" BINARY\n'
+        '  TRACK 01 MODE2/2352\n'
+        '    INDEX 01 00:00:00\n'
+    )
+
+
+def test_find_lone_iso_files_finds_standalone_iso(tmp_path):
+    write_data_sector_iso(tmp_path / "Game (USA).iso")
+
+    found = rc.find_lone_iso_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert [os.path.basename(f) for f in found] == ["Game (USA).iso"]
+
+
+def test_find_lone_iso_files_excludes_iso_referenced_by_a_cue(tmp_path):
+    """A .cue sheet can name an .iso as its FILE line instead of a .bin --
+    that .iso is already handled via the normal cue-conversion path, so
+    it must not also be picked up here (which would produce a second,
+    redundant .chd for the same release).
+    """
+    write_data_sector_iso(tmp_path / "Game (USA).iso")
+    (tmp_path / "Game (USA).cue").write_text(
+        'FILE "Game (USA).iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+
+    found = rc.find_lone_iso_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert found == []
+
+
+def test_find_lone_iso_files_ignores_duplicates_folder(tmp_path):
+    write_data_sector_iso(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Old (USA).iso")
+
+    found = rc.find_lone_iso_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert found == []
+
+
+def test_plan_chd_conversion_includes_lone_iso_with_detected_track_mode(tmp_path):
+    write_raw_sector_iso(tmp_path / "Game (USA).iso")
+
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
+
+    assert unrecognized_isos == []
+    assert len(to_convert) == 1
+    source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode = to_convert[0]
+    assert os.path.basename(source_path) == "Game (USA).iso"
+    assert source_kind == "iso"
+    assert track_mode == rc.ISO_TRACK_MODE_RAW
+    assert os.path.basename(final_chd_path) == "Game (USA).chd"
+
+
+def test_plan_chd_conversion_reports_unrecognized_iso_separately(tmp_path):
+    (tmp_path / "Weird.iso").write_bytes(b"\x00" * 999)
+
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_convert == []
     assert already_done == []
+    assert [os.path.basename(f) for f in unrecognized_isos] == ["Weird.iso"]
+
+
+def test_plan_chd_conversion_skips_iso_when_chd_already_exists(tmp_path):
+    write_data_sector_iso(tmp_path / "Game (USA).iso")
+    touch(tmp_path / "Game (USA).chd")
+
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_convert == []
+    assert [os.path.basename(f) for f in already_done] == ["Game (USA).iso"]
+
+
+def test_plan_chd_conversion_ignores_duplicates_folder(tmp_path):
+    touch(tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Final Fantasy VIII (Disc 1).cue")
+
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
+
+    assert to_convert == []
+    assert already_done == []
+    assert unrecognized_isos == []
 
 
 def test_find_chdman_resolves_override_path(tmp_path):
@@ -250,24 +394,29 @@ def test_find_chdman_returns_none_for_missing_override(tmp_path):
 def test_plan_chd_conversion_no_move_for_direct_cue(tmp_path):
     touch(tmp_path / "Game (USA).cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
+    assert unrecognized_isos == []
     assert len(to_convert) == 1
-    cue_path, working_chd_path, final_chd_path, needs_move = to_convert[0]
+    cue_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode = to_convert[0]
     assert needs_move is False
     assert working_chd_path == final_chd_path
     assert os.path.dirname(final_chd_path) == str(tmp_path)
+    assert source_kind == "cue"
+    assert track_mode is None
 
 
 def test_plan_chd_conversion_moves_nested_cue(tmp_path):
     release_dir = tmp_path / "Some Game (USA)"
     touch(release_dir / "Some Game (USA).cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert len(to_convert) == 1
-    cue_path, working_chd_path, final_chd_path, needs_move = to_convert[0]
+    cue_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode = to_convert[0]
     assert needs_move is True
     assert os.path.dirname(working_chd_path) == str(release_dir)
     assert os.path.dirname(final_chd_path) == str(tmp_path)
@@ -277,7 +426,8 @@ def test_plan_chd_conversion_skips_when_chd_already_exists(tmp_path):
     touch(tmp_path / "Game (USA).cue")
     touch(tmp_path / "Game (USA).chd")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_convert == []
     assert len(already_done) == 1
@@ -293,7 +443,8 @@ def test_plan_chd_conversion_skips_nested_cue_when_final_dest_already_exists(tmp
     touch(release_dir / "Some Game (USA).cue")
     touch(tmp_path / "Some Game (USA).chd")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_convert == []
     assert len(already_done) == 1
@@ -303,7 +454,8 @@ def test_plan_chd_conversion_handles_name_collision(tmp_path):
     touch(tmp_path / "A" / "Game.cue")
     touch(tmp_path / "B" / "Game.cue")
 
-    to_convert, already_done = rc.plan_chd_conversion(str(tmp_path), default_dup_dir(tmp_path))
+    to_convert, already_done, unrecognized_isos = rc.plan_chd_conversion(
+        str(tmp_path), default_dup_dir(tmp_path))
 
     assert len(to_convert) == 2
     final_names = sorted(os.path.basename(t[2]) for t in to_convert)
@@ -2392,6 +2544,80 @@ def test_convert_to_chd_apply_converts_direct_cue(tmp_path):
     assert "Converted 1/1" in result.stdout
 
 
+def test_convert_to_chd_apply_converts_standalone_iso(tmp_path):
+    stub = write_chdman_stub(tmp_path)
+    console_dir = tmp_path / "PSX"
+    write_raw_sector_iso(console_dir / "Game (USA).iso")
+
+    result = run_script(console_dir, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert (console_dir / "Game (USA).chd").exists()
+    assert (console_dir / "Game (USA).iso").exists()  # original left in place
+    assert "Converted 1/1" in result.stdout
+    assert "synthesizing MODE2/2352 cue sheet" in result.stdout
+
+
+def test_convert_to_chd_synthesized_cue_does_not_persist_after_apply(tmp_path):
+    """The .cue synthesized for a standalone .iso is scratch work for
+    chdman, not a real artifact -- it must be cleaned up regardless of
+    whether the conversion succeeds, not left behind looking like a real
+    (but redundant/misleading) cue sheet next to the .iso.
+    """
+    stub = write_chdman_stub(tmp_path)
+    write_raw_sector_iso(tmp_path / "Game (USA).iso")
+
+    run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert not (tmp_path / "Game (USA).cue").exists()
+
+
+def test_convert_to_chd_synthesized_cue_cleaned_up_even_on_chdman_failure(tmp_path):
+    stub = write_chdman_stub(tmp_path, fail=True)
+    write_raw_sector_iso(tmp_path / "Game (USA).iso")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert not (tmp_path / "Game (USA).cue").exists()
+    assert not (tmp_path / "Game (USA).chd").exists()
+    assert "ERROR converting" in result.stderr
+
+
+def test_convert_to_chd_dry_run_does_not_synthesize_cue(tmp_path):
+    stub = write_chdman_stub(tmp_path)
+    write_raw_sector_iso(tmp_path / "Game (USA).iso")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub)
+
+    assert "DRY RUN" in result.stdout
+    assert not (tmp_path / "Game (USA).cue").exists()
+    assert not (tmp_path / "Game (USA).chd").exists()
+
+
+def test_convert_to_chd_apply_does_not_double_convert_iso_referenced_by_cue(tmp_path):
+    stub = write_chdman_stub(tmp_path)
+    write_data_sector_iso(tmp_path / "Game (USA).iso")
+    (tmp_path / "Game (USA).cue").write_text(
+        'FILE "Game (USA).iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert (tmp_path / "Game (USA).chd").exists()
+    assert "Converted 1/1" in result.stdout  # not 2 -- the .iso wasn't independently queued
+
+
+def test_convert_to_chd_reports_unrecognized_iso_and_continues(tmp_path):
+    stub = write_chdman_stub(tmp_path)
+    (tmp_path / "Weird.iso").write_bytes(b"\x00" * 999)
+    touch(tmp_path / "Normal Game (USA).cue")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert "needs manual review" in result.stderr
+    assert (tmp_path / "Normal Game (USA).chd").exists()
+    assert not (tmp_path / "Weird.chd").exists()
+
+
 def test_convert_to_chd_apply_never_resurrects_quarantined_cue(tmp_path):
     """Reported bug: a .cue that a prior scan already routed into
     .duplicates/Redundant-Raw-Disc/ (because a .chd already exists for
@@ -2406,7 +2632,7 @@ def test_convert_to_chd_apply_never_resurrects_quarantined_cue(tmp_path):
 
     result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
 
-    assert "No .cue files found" in result.stdout
+    assert "No .cue/.iso files found" in result.stdout
     assert not (tmp_path / "Loser (USA).chd").exists()
     assert not (tmp_path / "Loser2 (USA).chd").exists()
     assert (tmp_path / ".duplicates" / "Redundant-Raw-Disc" / "Loser (USA).cue").exists()
@@ -2468,7 +2694,7 @@ def test_convert_to_chd_no_cue_files_found(tmp_path):
 
     result = run_script(console_dir, "--convert-to-chd", "--chdman-path", stub)
 
-    assert "No .cue files found" in result.stdout
+    assert "No .cue/.iso files found" in result.stdout
 
 
 def test_convert_to_chd_and_flatten_alpha_dirs_cannot_combine(tmp_path):
