@@ -147,6 +147,12 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   the two *shapes* the file has, but can't distinguish finer raw-sector
   sub-modes some platforms occasionally need — if a specific title doesn't
   play right after conversion, that's the first thing to check by hand.
+
+  With `--apply`, each conversion is announced right before it starts —
+  a single line that updates in place on a real terminal, or one line
+  per item when output is redirected (a log file, CI) — instead of
+  dumping the whole job list upfront and then going silent while
+  `chdman` actually works through a long run.
 - **Groups multi-disc games into ES-DE/RetroArch's `.m3u` layout**
   (`--make-m3u`) — finds disc-tagged `.chd` (CD-based systems) or `.rvz`
   (GameCube/Wii, via Dolphin) releases (e.g. `Game (USA) (Disc 1).chd`,

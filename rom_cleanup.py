@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -1042,6 +1042,22 @@ def plan_chd_conversion(roms_dir, dup_dir):
     return to_convert, already_done, unrecognized_isos
 
 
+def _print_progress(text, use_inplace):
+    """Print one progress update. When use_inplace is True (a real
+    terminal, not a pipe/log file), overwrites the previous update on the
+    same line via a carriage return, padded to the terminal width so
+    nothing lingers from a longer previous line -- otherwise printed as a
+    plain new line, since overwriting doesn't make sense once output is
+    redirected (it would just corrupt a log file with a string of \\r
+    characters instead of one line per item).
+    """
+    if use_inplace:
+        width = shutil.get_terminal_size(fallback=(80, 24)).columns
+        print("\r" + text[:width - 1].ljust(width - 1), end="", flush=True)
+    else:
+        print(text)
+
+
 def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
     """Find every .cue file, plus every standalone .iso not already
     claimed by one, under roms_dir, convert each to .chd via 'chdman
@@ -1103,16 +1119,28 @@ def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
     blocked = len(unrecognized_isos)
 
     for source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode in to_convert:
-        note = "  (synthesizing {0} cue sheet)".format(track_mode) if source_kind == "iso" else ""
-        print("[CONVERT] {0}{1}{2}".format(
-            os.path.relpath(source_path, roms_dir),
-            "  ->  {0}".format(os.path.relpath(final_chd_path, roms_dir)) if needs_move else "",
-            note))
+        if not apply:
+            # In apply mode this is printed later, right before each
+            # conversion actually starts (see the progress loop below) --
+            # printing the whole list here first is what used to make a
+            # long run look like it dumped everything and then went
+            # silent, with no way to tell which one was actually running.
+            note = "  (synthesizing {0} cue sheet)".format(track_mode) if source_kind == "iso" else ""
+            print("[CONVERT] {0}{1}{2}".format(
+                os.path.relpath(source_path, roms_dir),
+                "  ->  {0}".format(os.path.relpath(final_chd_path, roms_dir)) if needs_move else "",
+                note))
 
         if source_kind == "cue":
             mismatches = find_cue_case_mismatches(source_path)
             source_dir = os.path.dirname(source_path)
             rename_failed = False
+
+            if apply and mismatches:
+                # Not printed above for every file in apply mode (see the
+                # comment there), but a mismatch needs fixing/reporting, so
+                # the [CASE-FIX]/error line(s) below need this for context.
+                print("[CONVERT] {0}".format(os.path.relpath(source_path, roms_dir)))
 
             for referenced, actual in mismatches:
                 if actual is None:
@@ -1146,7 +1174,13 @@ def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
 
     converted = 0
     errors = blocked
-    for source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode in convertible:
+    use_inplace = sys.stdout.isatty()
+    total = len(convertible)
+    for i, (source_path, working_chd_path, final_chd_path, needs_move, source_kind, track_mode) in enumerate(convertible, 1):
+        note = "  (synthesizing {0} cue sheet)".format(track_mode) if source_kind == "iso" else ""
+        _print_progress("[{0}/{1}] Converting: {2}{3}".format(
+            i, total, os.path.relpath(source_path, roms_dir), note), use_inplace)
+
         synthesized_cue_path = None
         convert_input = source_path
         if source_kind == "iso":
@@ -1168,9 +1202,10 @@ def convert_to_chd(roms_dir, dup_dir, apply, chdman_path=None):
                     print("  Warning: could not remove synthesized cue sheet {0}: "
                           "{1}".format(os.path.relpath(synthesized_cue_path, roms_dir), e),
                           file=sys.stderr)
-
         if result.returncode != 0:
             errors += 1
+            if use_inplace:
+                print()  # seal the in-place line before an unrelated stderr write
             print("  ERROR converting {0}: {1}".format(
                 os.path.relpath(source_path, roms_dir),
                 (result.stderr or result.stdout).strip()), file=sys.stderr)
@@ -2367,8 +2402,14 @@ def main():
                               "converted. Original .bin/.cue/.iso files are left in "
                               "place -- run the normal scan with --apply "
                               "afterward to route them into "
-                              ".duplicates/Redundant-Raw-Disc/. Respects --apply "
-                              "(dry-run preview by default). Runs standalone.")
+                              ".duplicates/Redundant-Raw-Disc/. With --apply, "
+                              "announces each conversion right before it starts "
+                              "(a single updating line on a real terminal, one "
+                              "line per item when output is redirected) instead "
+                              "of dumping the whole job list upfront and going "
+                              "silent while chdman works through it. Respects "
+                              "--apply (dry-run preview by default, showing the "
+                              "full list). Runs standalone.")
     parser.add_argument("--chdman-path", default=None, metavar="PATH",
                          help="Path to the chdman executable, if it's not on "
                               "PATH (default: look up 'chdman' on PATH)")

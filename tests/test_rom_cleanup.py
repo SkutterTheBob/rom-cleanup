@@ -2618,6 +2618,90 @@ def test_convert_to_chd_reports_unrecognized_iso_and_continues(tmp_path):
     assert not (tmp_path / "Weird.chd").exists()
 
 
+# -- live progress indicator (--convert-to-chd --apply) ------------------
+
+def test_print_progress_inplace_pads_over_a_longer_previous_line():
+    """Each update must fully overwrite any leftover characters from a
+    longer previous line -- otherwise a short filename following a long
+    one would show garbage trailing characters from the old line.
+    """
+    import io
+
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc._print_progress("[1/2] Converting: A very long filename indeed.cue", True)
+        rc._print_progress("[2/2] Converting: X.cue", True)
+    finally:
+        sys.stdout = old_stdout
+
+    updates = buf.getvalue().split("\r")[1:]
+    assert len(updates) == 2
+    assert len(updates[0]) == len(updates[1])  # same padded width
+    assert updates[1].startswith("[2/2] Converting: X.cue")
+    assert updates[1].strip().endswith("X.cue")  # no leftover from line 1
+
+
+def test_print_progress_non_inplace_prints_plain_lines(capsys):
+    rc._print_progress("[1/2] Converting: A.cue", False)
+    rc._print_progress("[2/2] Converting: B.cue", False)
+
+    out = capsys.readouterr().out
+    assert out == "[1/2] Converting: A.cue\n[2/2] Converting: B.cue\n"
+
+
+def test_convert_to_chd_apply_shows_per_item_progress_not_upfront_dump(tmp_path):
+    """Reported UX gap: --apply used to print the whole [CONVERT] job list
+    immediately, then go silent while chdman actually ran each one, with
+    no way to tell which conversion was in progress. In apply mode this
+    line now appears per item instead (piped/non-tty output here, so the
+    plain-newline fallback -- but the shape is what matters: numbered
+    progress, not the bare "[CONVERT] X -> Y" dry-run announcement).
+    """
+    stub = write_chdman_stub(tmp_path)
+    touch(tmp_path / "Game A (USA).cue")
+    touch(tmp_path / "Game B (USA).cue")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert "[1/2] Converting: Game A (USA).cue" in result.stdout
+    assert "[2/2] Converting: Game B (USA).cue" in result.stdout
+    assert "[CONVERT] Game A (USA).cue" not in result.stdout
+
+
+def test_convert_to_chd_dry_run_still_shows_full_upfront_list(tmp_path):
+    """The upfront full-list announcement is still correct for dry-run --
+    only --apply's behavior changed."""
+    stub = write_chdman_stub(tmp_path)
+    touch(tmp_path / "Game A (USA).cue")
+    touch(tmp_path / "Game B (USA).cue")
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub)
+
+    assert "[CONVERT] Game A (USA).cue" in result.stdout
+    assert "[CONVERT] Game B (USA).cue" in result.stdout
+
+
+def test_convert_to_chd_apply_case_fix_still_shows_which_cue(tmp_path):
+    """The upfront per-item announcement is suppressed in apply mode
+    (see above), but a case-mismatch fix must still be attributable to
+    its cue -- this is the one case where a [CONVERT] line is still
+    printed before the case-mismatch details, since there'd otherwise be
+    nothing identifying which file the fix applies to.
+    """
+    stub = write_chdman_stub(tmp_path)
+    (tmp_path / "Game (USA).cue").write_text(
+        'FILE "GAME.BIN" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+    touch(tmp_path / "game.bin")  # actual file differs only in case
+
+    result = run_script(tmp_path, "--convert-to-chd", "--chdman-path", stub, "--apply")
+
+    assert "[CONVERT] Game (USA).cue" in result.stdout
+    assert "[CASE-FIX]" in result.stdout
+
+
 def test_convert_to_chd_apply_never_resurrects_quarantined_cue(tmp_path):
     """Reported bug: a .cue that a prior scan already routed into
     .duplicates/Redundant-Raw-Disc/ (because a .chd already exists for
