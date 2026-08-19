@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.10.0
+
+- Added `--fix-filename-spacing`: finds every `.chd`/`.iso` file under
+  `roms_dir` with a trailing space right before the extension (e.g.
+  `Game .chd`) -- a naming artifact some ripping/download tools leave
+  behind -- and strips it (`Game.chd`). Scoped to `.chd`/`.iso` for now;
+  the same fix for `.cue`/`.bin` would need to also touch whichever file
+  references the renamed one to avoid breaking that pairing, which is a
+  related but separate problem.
+
+  If a `.cue` names the badly-spaced file as its data track, or an
+  `.m3u` playlist (see `--make-m3u`) references it (grouped before being
+  renamed), that reference is updated too, so the rename can't silently
+  break a working cue/bin pairing or multi-disc playlist. Collisions are
+  handled the same way as everywhere else in the tool -- if the
+  correctly-named file already exists too (an actual duplicate, not just
+  a naming artifact), the rename never overwrites it. Never touches
+  `.duplicates/`. Respects `--apply` (dry-run preview by default) and
+  runs standalone.
+
+## 1.9.1
+
+- `--convert-to-chd --apply` no longer dumps the entire conversion job
+  list up front and then goes silent while chdman actually works through
+  it -- for a long run (each conversion can take real minutes for a
+  large disc image), there was no way to tell which one was currently
+  running or how far along the batch was. Apply mode now announces each
+  conversion right before it starts instead of all at once beforehand;
+  attached to a real terminal, that announcement updates a single line
+  in place (`[12/47] Converting: Game Name.cue`) rather than scrolling,
+  padded to the terminal width so a shorter filename fully overwrites a
+  longer previous one. Piped or redirected output (a log file, CI, a
+  captured test run) falls back to one line per item instead of
+  overwriting in place, since a live-updating line only makes sense on
+  an actual terminal. Dry-run is unchanged -- the full upfront list is
+  still the right preview there, since nothing is actually running yet.
+  A case-mismatch fix (see `find_cue_case_mismatches`) still prints which
+  `.cue` it belongs to even in apply mode, since that's the one case
+  where the deferred per-item announcement would otherwise leave a
+  `[CASE-FIX]` line with nothing identifying which file it applies to.
+
 ## 1.9.0
 
 - `--convert-to-chd` now also converts a standalone `.iso` (one not
@@ -22,27 +63,6 @@
   at. An `.iso` already referenced by a `.cue` in the same folder is left
   to that existing cue-conversion path, so it's never double-converted
   into two competing `.chd` files for the same release.
-
-## 1.9.1
-
-- `--convert-to-chd --apply` no longer dumps the entire conversion job
-  list up front and then goes silent while chdman actually works through
-  it -- for a long run (each conversion can take real minutes for a
-  large disc image), there was no way to tell which one was currently
-  running or how far along the batch was. Apply mode now announces each
-  conversion right before it starts instead of all at once beforehand;
-  attached to a real terminal, that announcement updates a single line
-  in place (`[12/47] Converting: Game Name.cue`) rather than scrolling,
-  padded to the terminal width so a shorter filename fully overwrites a
-  longer previous one. Piped or redirected output (a log file, CI, a
-  captured test run) falls back to one line per item instead of
-  overwriting in place, since a live-updating line only makes sense on
-  an actual terminal. Dry-run is unchanged -- the full upfront list is
-  still the right preview there, since nothing is actually running yet.
-  A case-mismatch fix (see `find_cue_case_mismatches`) still prints which
-  `.cue` it belongs to even in apply mode, since that's the one case
-  where the deferred per-item announcement would otherwise leave a
-  `[CASE-FIX]` line with nothing identifying which file it applies to.
 
 ## 1.8.1
 
