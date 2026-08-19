@@ -109,16 +109,19 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   hidden `.rom-cleanup-gamelist-xml.bak` right next to it (overwritten on each re-run
   that actually changes something, so it always holds the most recent
   original).
-- **Converts bin/cue CD images to CHD** (`--convert-to-chd`) — finds every
-  `.cue` file under the folder you point it at and converts it to `.chd`
-  via `chdman createcd` (requires `chdman`, which ships with `mame-tools`,
-  on `PATH`, or pass `--chdman-path`). If the `.cue` wasn't already
-  directly in that folder — e.g. it's sitting in its own per-release
-  subfolder alongside its `.bin` tracks — the resulting `.chd` is moved up
-  into the folder itself, alongside the rest of the roms. Skips a `.cue`
-  whose `.chd` already exists, so re-runs are cheap and resumable. Leaves
-  the original `.bin`/`.cue` files in place; run the normal duplicate scan
-  with `--apply` afterward and it'll automatically route them into
+- **Converts bin/cue and standalone-ISO CD images to CHD** (`--convert-to-chd`)
+  — finds every `.cue` file, plus every standalone `.iso` not already
+  referenced by one (some cue sheets name an `.iso` as their data track
+  instead of a `.bin` — that one's already covered by the normal cue path),
+  under the folder you point it at, and converts each to `.chd` via
+  `chdman createcd` (requires `chdman`, which ships with `mame-tools`, on
+  `PATH`, or pass `--chdman-path`). If the source wasn't already directly
+  in that folder — e.g. it's sitting in its own per-release subfolder
+  alongside its `.bin` tracks — the resulting `.chd` is moved up into the
+  folder itself, alongside the rest of the roms. Skips a file whose `.chd`
+  already exists, so re-runs are cheap and resumable. Leaves the original
+  `.bin`/`.cue`/`.iso` files in place; run the normal duplicate scan with
+  `--apply` afterward and it'll automatically route them into
   `.duplicates/Redundant-Raw-Disc/` (it already detects a `.chd` alongside
   raw disc files for the same release). Also runs standalone and respects
   `--apply`. Before handing a `.cue` to `chdman`, checks that every file it
@@ -130,6 +133,20 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   with `--apply`); when it's missing entirely or ambiguous, that `.cue` is
   reported and skipped instead of being handed to `chdman`, whose own
   error message for this doesn't clearly name the actual missing file.
+
+  A standalone `.iso` has no `.cue` of its own — `createcd` needs one even
+  for a single track, so one is synthesized on the fly right next to the
+  `.iso` and removed again afterward, regardless of outcome. Which CD
+  track type it declares (`MODE2/2352` for a raw sector dump, the usual
+  shape for PSX and most CD-XA-derived systems; `MODE1/2048` for a plain
+  ISO9660 data image) is **detected from the file itself** — its size and,
+  for the raw case, the CD-ROM sync pattern at the start of each sector —
+  not guessed from the `.iso` extension alone. An `.iso` whose size
+  doesn't cleanly match either sector layout is left alone and flagged for
+  manual review rather than guessed at. This detection identifies which of
+  the two *shapes* the file has, but can't distinguish finer raw-sector
+  sub-modes some platforms occasionally need — if a specific title doesn't
+  play right after conversion, that's the first thing to check by hand.
 - **Groups multi-disc games into ES-DE/RetroArch's `.m3u` layout**
   (`--make-m3u`) — finds disc-tagged `.chd` (CD-based systems) or `.rvz`
   (GameCube/Wii, via Dolphin) releases (e.g. `Game (USA) (Disc 1).chd`,
@@ -208,7 +225,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--filter-file PATH` | Override the filter file location (default: `<roms_dir>/rom_filters.txt` if present) |
 | `--flatten-alpha-dirs` | Move files out of single-letter `A`-`Z` (or `#`/`0-9`/`Misc`/`[BIOS]`/etc) bucket subfolders directly under `roms_dir`, then remove those folders |
 | `--gamelist-clean` | Remove `<game>` entries containing `ZZZ(notgame)` from every `gamelist.xml` found under `roms_dir` (backs each changed file up to `.rom-cleanup-gamelist-xml.bak` first) |
-| `--convert-to-chd` | Convert every `.cue` found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
+| `--convert-to-chd` | Convert every `.cue` (and standalone `.iso`) found under `roms_dir` to `.chd` via `chdman`, moving the result up into `roms_dir` if it was nested in a subfolder |
 | `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
 | `--make-m3u` | Group disc-tagged `.chd`/`.rvz` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden per-format folder (`.chd/` or `.rvz/`) |
 | `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/.imports/` (hidden from ES-DE/RetroArch), keeping every region/revision of that title together |
