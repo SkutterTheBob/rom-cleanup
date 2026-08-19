@@ -353,7 +353,7 @@ def test_plan_m3u_grouping_groups_rvz_releases_under_their_own_hidden_folder(tmp
     touch(tmp_path / "Baten Kaitos (USA) (Disc 1).rvz")
     touch(tmp_path / "Baten Kaitos (USA) (Disc 2).rvz")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert already_done == []
     assert ambiguous == []
@@ -373,7 +373,7 @@ def test_plan_m3u_grouping_does_not_cross_formats(tmp_path):
     touch(tmp_path / "Game (USA) (Disc 1).chd")
     touch(tmp_path / "Game (USA) (Disc 1).rvz")
 
-    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path))
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
 
     assert to_group == []
     assert ambiguous == []
