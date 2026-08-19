@@ -3274,5 +3274,209 @@ def test_version_flag_prints_version():
     assert rc.__version__ in result.stdout
 
 
+# ---------------------------------------------------------------------
+# Unit + integration tests: fixing a trailing space before the extension
+# ---------------------------------------------------------------------
+
+def test_fix_trailing_space_in_filename_strips_space_before_chd():
+    assert rc.fix_trailing_space_in_filename("Game .chd") == "Game.chd"
+
+
+def test_fix_trailing_space_in_filename_strips_space_before_iso():
+    assert rc.fix_trailing_space_in_filename("Game .iso") == "Game.iso"
+
+
+def test_fix_trailing_space_in_filename_strips_multiple_trailing_spaces():
+    assert rc.fix_trailing_space_in_filename("Game   .chd") == "Game.chd"
+
+
+def test_fix_trailing_space_in_filename_none_when_no_space(tmp_path):
+    assert rc.fix_trailing_space_in_filename("Game.chd") is None
+
+
+def test_fix_trailing_space_in_filename_none_for_unrelated_extension():
+    """Scoped to .chd/.iso only -- a space before .zip is a different,
+    separate problem not handled by this operation.
+    """
+    assert rc.fix_trailing_space_in_filename("Game .zip") is None
+
+
+def test_fix_trailing_space_in_filename_preserves_internal_spacing():
+    """Only the trailing space right before the extension is stripped --
+    normal spacing within the rest of the title is untouched.
+    """
+    assert rc.fix_trailing_space_in_filename("Some Game - Subtitle .chd") == \
+        "Some Game - Subtitle.chd"
+
+
+def test_find_badly_spaced_files_finds_affected_files(tmp_path):
+    touch(tmp_path / "Bad Game .chd")
+    touch(tmp_path / "Good Game (USA).chd")
+    touch(tmp_path / "Bad Game .iso")
+
+    found = rc.find_badly_spaced_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    names = sorted(os.path.basename(p) for p, _fixed in found)
+    assert names == ["Bad Game .chd", "Bad Game .iso"]
+
+
+def test_find_badly_spaced_files_ignores_duplicates_folder(tmp_path):
+    touch(tmp_path / ".duplicates" / "Old Bad Game .chd")
+
+    found = rc.find_badly_spaced_files(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert found == []
+
+
+def test_plan_filename_spacing_fix_avoids_collision_with_existing_file(tmp_path):
+    """If the correctly-named file already exists too (an actual
+    duplicate, not just a naming artifact), the rename must not silently
+    overwrite it -- same collision-avoidance convention as everywhere
+    else that renames/moves files in this tool.
+    """
+    touch(tmp_path / "Game .chd")
+    touch(tmp_path / "Game.chd")
+
+    to_rename = rc.plan_filename_spacing_fix(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(to_rename) == 1
+    _old_path, new_path, _refs = to_rename[0]
+    assert os.path.basename(new_path) == "Game (1).chd"
+
+
+def test_plan_filename_spacing_fix_detects_cue_reference(tmp_path):
+    touch(tmp_path / "Game .iso")
+    (tmp_path / "Game.cue").write_text(
+        'FILE "Game .iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+
+    to_rename = rc.plan_filename_spacing_fix(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(to_rename) == 1
+    _old_path, _new_path, refs = to_rename[0]
+    assert len(refs) == 1
+    assert refs[0][1] == "cue"
+
+
+def test_plan_filename_spacing_fix_detects_m3u_reference(tmp_path):
+    hidden_dir = tmp_path / rc.CHD_EXTENSION / "Multi Game (USA)"
+    touch(hidden_dir / "Multi Game (USA) (Disc 1) .chd")
+    touch(hidden_dir / "Multi Game (USA) (Disc 2).chd")
+    (tmp_path / "Multi Game (USA).m3u").write_text(
+        ".chd/Multi Game (USA)/Multi Game (USA) (Disc 1) .chd\n"
+        ".chd/Multi Game (USA)/Multi Game (USA) (Disc 2).chd\n",
+        encoding="utf-8")
+
+    to_rename = rc.plan_filename_spacing_fix(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(to_rename) == 1
+    _old_path, _new_path, refs = to_rename[0]
+    assert len(refs) == 1
+    assert refs[0][1] == "m3u"
+
+
+def test_rewrite_cue_file_reference_preserves_quoting_and_rest_of_line(tmp_path):
+    cue_path = tmp_path / "Game.cue"
+    cue_path.write_text(
+        'FILE "Game .iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+
+    changed = rc.rewrite_cue_file_reference(str(cue_path), "Game .iso", "Game.iso")
+
+    assert changed is True
+    assert cue_path.read_text(encoding="utf-8") == (
+        'FILE "Game.iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n')
+
+
+def test_rewrite_cue_file_reference_false_when_no_match(tmp_path):
+    cue_path = tmp_path / "Game.cue"
+    cue_path.write_text('FILE "Other.iso" BINARY\n  TRACK 01 MODE1/2048\n', encoding="utf-8")
+
+    changed = rc.rewrite_cue_file_reference(str(cue_path), "Game .iso", "Game.iso")
+
+    assert changed is False
+    assert 'FILE "Other.iso"' in cue_path.read_text(encoding="utf-8")
+
+
+def test_rewrite_m3u_disc_reference_updates_matching_line_only(tmp_path):
+    m3u_path = tmp_path / "Game.m3u"
+    m3u_path.write_text(
+        ".chd/Game/Game (Disc 1) .chd\n.chd/Game/Game (Disc 2).chd\n", encoding="utf-8")
+
+    changed = rc.rewrite_m3u_disc_reference(
+        str(m3u_path), ".chd/Game/Game (Disc 1) .chd", ".chd/Game/Game (Disc 1).chd")
+
+    assert changed is True
+    assert m3u_path.read_text(encoding="utf-8") == (
+        ".chd/Game/Game (Disc 1).chd\n.chd/Game/Game (Disc 2).chd\n")
+
+
+def test_fix_filename_spacing_dry_run_does_not_rename(tmp_path):
+    touch(tmp_path / "Bad Game .chd")
+
+    result = run_script(tmp_path, "--fix-filename-spacing")
+
+    assert "DRY RUN" in result.stdout
+    assert (tmp_path / "Bad Game .chd").exists()
+
+
+def test_fix_filename_spacing_apply_renames_file(tmp_path):
+    touch(tmp_path / "Bad Game .chd")
+
+    result = run_script(tmp_path, "--fix-filename-spacing", "--apply")
+
+    assert not (tmp_path / "Bad Game .chd").exists()
+    assert (tmp_path / "Bad Game.chd").exists()
+    assert "Fixed 1/1" in result.stdout
+
+
+def test_fix_filename_spacing_apply_updates_cue_reference(tmp_path):
+    touch(tmp_path / "Game .iso")
+    (tmp_path / "Game.cue").write_text(
+        'FILE "Game .iso" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n',
+        encoding="utf-8")
+
+    run_script(tmp_path, "--fix-filename-spacing", "--apply")
+
+    assert (tmp_path / "Game.iso").exists()
+    assert 'FILE "Game.iso"' in (tmp_path / "Game.cue").read_text(encoding="utf-8")
+
+
+def test_fix_filename_spacing_apply_updates_m3u_reference_and_playlist_still_resolves(tmp_path):
+    """End-to-end regression: after the rename, the .m3u's relative disc
+    paths must still resolve to real files -- this is the whole point of
+    updating the reference at all.
+    """
+    hidden_dir = tmp_path / rc.CHD_EXTENSION / "Multi Game (USA)"
+    touch(hidden_dir / "Multi Game (USA) (Disc 1) .chd")
+    touch(hidden_dir / "Multi Game (USA) (Disc 2).chd")
+    m3u_path = tmp_path / "Multi Game (USA).m3u"
+    m3u_path.write_text(
+        ".chd/Multi Game (USA)/Multi Game (USA) (Disc 1) .chd\n"
+        ".chd/Multi Game (USA)/Multi Game (USA) (Disc 2).chd\n",
+        encoding="utf-8")
+
+    run_script(tmp_path, "--fix-filename-spacing", "--apply")
+
+    for line in m3u_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            assert (tmp_path / line.strip()).exists(), line
+
+
+def test_fix_filename_spacing_ignores_duplicates_folder_end_to_end(tmp_path):
+    touch(tmp_path / ".duplicates" / "Old Bad Game .chd")
+
+    result = run_script(tmp_path, "--fix-filename-spacing", "--apply")
+
+    assert "No filenames" in result.stdout
+    assert (tmp_path / ".duplicates" / "Old Bad Game .chd").exists()
+
+
+def test_fix_filename_spacing_and_convert_to_chd_cannot_combine(tmp_path):
+    result = run_script(tmp_path, "--fix-filename-spacing", "--convert-to-chd")
+    assert result.returncode != 0
+    assert "can't be combined" in result.stderr
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

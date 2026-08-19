@@ -213,6 +213,20 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   release to lose the duplicate comparison") doesn't translate to
   "protect it from being moved". Also runs standalone and respects
   `--apply`.
+- **Fixes a trailing space before the extension** (`--fix-filename-spacing`)
+  — finds every `.chd`/`.iso` file under `roms_dir` with a naming
+  artifact some ripping/download tools leave behind, e.g. `Game .chd`
+  instead of `Game.chd`, and strips it. Scoped to `.chd`/`.iso` for now —
+  the same fix for `.cue`/`.bin` would need to also touch whichever file
+  references the renamed one to avoid breaking that pairing, which is a
+  related but separate problem. If a `.cue` names the badly-spaced file
+  as its data track, or an `.m3u` playlist (see `--make-m3u`) references
+  it, that reference is updated too, so the rename can't silently break
+  a working cue/bin pairing or multi-disc playlist. Collisions are
+  handled the same way as everywhere else in the tool — if the
+  correctly-named file already exists too (an actual duplicate, not just
+  a naming artifact), the rename never overwrites it. Also runs
+  standalone and respects `--apply`.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -235,6 +249,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--chdman-path PATH` | Path to the `chdman` executable, if it's not on `PATH` (default: look up `chdman` on `PATH`) |
 | `--make-m3u` | Group disc-tagged `.chd`/`.rvz` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden per-format folder (`.chd/` or `.rvz/`) |
 | `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/.imports/` (hidden from ES-DE/RetroArch), keeping every region/revision of that title together |
+| `--fix-filename-spacing` | Strip a trailing space right before the extension on every `.chd`/`.iso` under `roms_dir` (e.g. `Game .chd` → `Game.chd`), updating any `.cue`/`.m3u` reference to match |
 | `--version` | Print the script version and exit |
 
 ## Installing chdman (for `--convert-to-chd`)

@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -1490,6 +1490,205 @@ def make_m3u_playlists(roms_dir, dup_dir, apply):
     return grouped, len(already_done)
 
 
+# ---- fixing a trailing space before the extension -----------------------
+
+# Extensions this fixes a trailing space in front of, e.g. "Game .chd" ->
+# "Game.chd" -- a naming artifact some ripping/download tools leave
+# behind. Scoped to these two for now; a plain space right before .cue or
+# .bin would need the same fix applied to whichever file references it
+# (a .cue's FILE line, or another .cue naming that .bin) to avoid
+# breaking that pairing, which is a related but separate problem.
+FILENAME_SPACE_FIX_EXTENSIONS = {CHD_EXTENSION, ISO_EXTENSION}
+
+
+def fix_trailing_space_in_filename(filename):
+    """If filename has one of FILENAME_SPACE_FIX_EXTENSIONS and its stem
+    ends in whitespace right before the extension (e.g. "Game .iso"),
+    return the corrected name with that whitespace stripped (e.g.
+    "Game.iso"). Returns None if the extension isn't one this fixes, or
+    there's no trailing whitespace to strip.
+    """
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() not in FILENAME_SPACE_FIX_EXTENSIONS:
+        return None
+    fixed_stem = stem.rstrip()
+    if fixed_stem == stem:
+        return None
+    return fixed_stem + ext
+
+
+def find_badly_spaced_files(roms_dir, dup_dir):
+    """Recursively find every file under roms_dir with a trailing space
+    before its extension (see fix_trailing_space_in_filename). Never
+    descends into dup_dir (see walk_excluding_dup_dir).
+
+    Returns [(path, fixed_name), ...].
+    """
+    found = []
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
+        for fname in files:
+            fixed = fix_trailing_space_in_filename(fname)
+            if fixed is not None:
+                found.append((os.path.join(root, fname), fixed))
+    return sorted(found)
+
+
+def rewrite_cue_file_reference(cue_path, old_name, new_name):
+    """Rewrite this .cue's FILE line to reference new_name instead of
+    old_name (preserving quoting style), leaving the rest of the cue
+    sheet untouched. Returns True if a matching reference was found and
+    rewritten.
+    """
+    with open(cue_path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+
+    matched = []
+
+    def _sub(m):
+        ref = m.group(1) if m.group(1) is not None else m.group(2)
+        if ref != old_name:
+            return m.group(0)
+        matched.append(True)
+        if m.group(1) is not None:
+            return m.group(0)[:m.start(1) - m.start(0)] + new_name + m.group(0)[m.end(1) - m.start(0):]
+        return m.group(0)[:m.start(2) - m.start(0)] + new_name
+
+    new_text = CUE_FILE_LINE_RE.sub(_sub, text)
+    if not matched:
+        return False
+    with open(cue_path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    return True
+
+
+def rewrite_m3u_disc_reference(m3u_path, old_relative, new_relative):
+    """Rewrite this .m3u playlist's content line referencing old_relative
+    (a path relative to the playlist's own directory, forward-slashed --
+    see make_m3u_playlists) to reference new_relative instead. Returns
+    True if a matching line was found and rewritten.
+    """
+    with open(m3u_path, "r", encoding="utf-8") as f:
+        lines = [line.rstrip("\n") for line in f]
+
+    changed = False
+    new_lines = []
+    for line in lines:
+        if line.strip() == old_relative:
+            new_lines.append(new_relative)
+            changed = True
+        else:
+            new_lines.append(line)
+
+    if not changed:
+        return False
+    with open(m3u_path, "w", encoding="utf-8", newline="\n") as f:
+        for line in new_lines:
+            f.write(line + "\n")
+    return True
+
+
+def plan_filename_spacing_fix(roms_dir, dup_dir):
+    """Work out the rename for each badly-spaced file (see
+    find_badly_spaced_files), plus which .cue or .m3u file (if any)
+    references its current name and will need updating to keep pointing
+    at it -- a .cue can name a badly-spaced .iso as its data track, and
+    an .m3u can reference a badly-spaced .chd/.iso if it was grouped by
+    --make-m3u before being renamed. Without this, the rename would
+    silently break that pairing/playlist.
+
+    Returns [(old_path, new_path, ref_updates), ...] where ref_updates is
+    [(ref_path, kind), ...], kind being "cue" or "m3u".
+    """
+    to_rename = []
+    reserved = set()
+
+    for old_path, fixed_name in find_badly_spaced_files(roms_dir, dup_dir):
+        old_dir = os.path.dirname(old_path)
+        old_name = os.path.basename(old_path)
+        new_path = unique_dest_path(old_dir, fixed_name, also_avoid=reserved)
+        reserved.add(new_path)
+
+        ref_updates = []
+
+        for fname in sorted(os.listdir(old_dir)):
+            if fname.lower().endswith(CUE_EXTENSION):
+                cue_path = os.path.join(old_dir, fname)
+                if old_name in parse_cue_file_references(cue_path):
+                    ref_updates.append((cue_path, "cue"))
+
+        old_relative = os.path.relpath(old_path, roms_dir).replace(os.sep, "/")
+        for fname in sorted(os.listdir(roms_dir)):
+            if fname.lower().endswith(M3U_EXTENSION):
+                m3u_path = os.path.join(roms_dir, fname)
+                with open(m3u_path, "r", encoding="utf-8", errors="replace") as f:
+                    if any(line.strip() == old_relative for line in f):
+                        ref_updates.append((m3u_path, "m3u"))
+
+        to_rename.append((old_path, new_path, ref_updates))
+
+    return to_rename
+
+
+def fix_filename_spacing(roms_dir, dup_dir, apply):
+    """Print (and, if apply, perform) the plan from
+    plan_filename_spacing_fix: strip a trailing space some ripping/
+    download tools leave right before a .chd/.iso extension. Updates any
+    .cue or .m3u reference to the old name so nothing is left pointing at
+    a file that no longer exists. Returns (fixed, errors).
+    """
+    to_rename = plan_filename_spacing_fix(roms_dir, dup_dir)
+    if not to_rename:
+        print("No filenames with a trailing space before {0} found under "
+              "{1}.".format(
+                  "/".join(sorted(FILENAME_SPACE_FIX_EXTENSIONS)), roms_dir))
+        return 0, 0
+
+    for old_path, new_path, ref_updates in to_rename:
+        print("[FIX] {0}  ->  {1}".format(
+            os.path.relpath(old_path, roms_dir), os.path.basename(new_path)))
+        for ref_path, kind in ref_updates:
+            print("  [{0}] also updates reference in {1}".format(
+                kind.upper(), os.path.relpath(ref_path, roms_dir)))
+
+    if not apply:
+        print("\nDRY RUN -- would fix {0} filename(s). Re-run with --apply "
+              "to do it.".format(len(to_rename)))
+        return len(to_rename), 0
+
+    fixed = 0
+    errors = 0
+    for old_path, new_path, ref_updates in to_rename:
+        old_name = os.path.basename(old_path)
+        new_name = os.path.basename(new_path)
+        old_relative = os.path.relpath(old_path, roms_dir).replace(os.sep, "/")
+
+        try:
+            os.rename(old_path, new_path)
+        except OSError as e:
+            errors += 1
+            print("  ERROR renaming {0}: {1}".format(
+                os.path.relpath(old_path, roms_dir), e), file=sys.stderr)
+            continue
+
+        for ref_path, kind in ref_updates:
+            try:
+                if kind == "cue":
+                    rewrite_cue_file_reference(ref_path, old_name, new_name)
+                else:
+                    dir_part = os.path.dirname(old_relative)
+                    new_relative = (dir_part + "/" + new_name) if dir_part else new_name
+                    rewrite_m3u_disc_reference(ref_path, old_relative, new_relative)
+            except OSError as e:
+                print("  Warning: could not update reference in {0}: {1}".format(
+                    os.path.relpath(ref_path, roms_dir), e), file=sys.stderr)
+
+        fixed += 1
+
+    print("\nFixed {0}/{1} filename(s){2}.".format(
+        fixed, len(to_rename), "; {0} error(s)".format(errors) if errors else ""))
+    return fixed, errors
+
+
 # ---- isolating titles never officially released in North America -------
 
 # Regions that count as "available in North America" for --isolate-imports:
@@ -2461,6 +2660,17 @@ def main():
                               "this one was hidden is migrated into \".imports/\" "
                               "automatically. Respects --apply (dry-run preview by "
                               "default). Runs standalone.".format(REJECT_SUBDIR))
+    parser.add_argument("--fix-filename-spacing", action="store_true",
+                         help="Find every .chd/.iso file under roms_dir with a "
+                              "trailing space right before the extension (e.g. "
+                              "\"Game .chd\") -- a naming artifact some ripping/"
+                              "download tools leave behind -- and strip it (e.g. "
+                              "\"Game.chd\"). Also updates a .cue that names the "
+                              "old filename as its data track, or an .m3u playlist "
+                              "(see --make-m3u) that references it, so neither is "
+                              "left pointing at a file that no longer exists. "
+                              "Respects --apply (dry-run preview by default). "
+                              "Runs standalone.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -2476,6 +2686,7 @@ def main():
         (args.convert_to_chd, "--convert-to-chd"),
         (args.make_m3u, "--make-m3u"),
         (args.isolate_imports, "--isolate-imports"),
+        (args.fix_filename_spacing, "--fix-filename-spacing"),
     ) if enabled]
     if len(standalone_flags) > 1:
         print("Error: {0} can't be combined -- run them one at a time.".format(
@@ -2506,6 +2717,10 @@ def main():
                          whitelist_releases=parsed_filter["whitelist_releases"],
                          reject_titles=parsed_filter["reject_titles"],
                          filter_file_used=filter_file_used)
+        return
+
+    if args.fix_filename_spacing:
+        fix_filename_spacing(roms_dir, dup_dir, args.apply)
         return
 
     prior_scan = read_scan_marker(roms_dir)
