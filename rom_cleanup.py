@@ -2617,14 +2617,33 @@ def _differ_only_in_numeric_tokens(tokens_a, tokens_b):
     return non_numeric_a == non_numeric_b and tokens_a != tokens_b
 
 
-def collect_title_index(roms_dir, dup_dir, extensions):
+def extract_regions(tags, region_priority):
+    """Return the set of recognized region tokens (lowercased, e.g.
+    "usa", "europe") found among these tags. Mirrors region_rank()'s
+    parsing of combined tags like "USA, Europe", but collects every
+    match instead of just the best-ranked one.
+    """
+    regions = set()
+    for tag in tags:
+        for part in re.split(r"[,/]", tag):
+            part = part.strip().lower()
+            if part in region_priority:
+                regions.add(part)
+    return regions
+
+
+def collect_title_index(roms_dir, dup_dir, extensions, region_priority=None):
     """Walk roms_dir and build a simple index of every distinct title_key
     found, independent of any filter file. Skips BIOS/proto-beta/
     (Program)-tagged files, matching scan_rom_files()'s treatment --
     they're not real "duplicate title" candidates.
 
-    Returns {title_key: {"display": str, "files": [path, ...]}}.
+    Returns {title_key: {"display": str, "files": [path, ...],
+    "regions": {region, ...}}}, where "regions" is the union of every
+    recognized region tag (see extract_regions()) found across all of
+    that title's files.
     """
+    region_priority = region_priority or DEFAULT_REGION_PRIORITY
     index = {}
     for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
         for fname in files:
@@ -2641,8 +2660,10 @@ def collect_title_index(roms_dir, dup_dir, extensions):
 
             title_key = normalize_title(base_title) or normalize_title(stem)
             display = base_title.strip() or stem
-            entry = index.setdefault(title_key, {"display": display, "files": []})
+            entry = index.setdefault(
+                title_key, {"display": display, "files": [], "regions": set()})
             entry["files"].append(os.path.join(root, fname))
+            entry["regions"].update(extract_regions(tags, region_priority))
     return index
 
 
@@ -2668,13 +2689,51 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
-def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
+def _region_relationship(regions_a, regions_b):
+    """Classify what a title pair's region tags say about whether
+    they're likely the same game under a different name:
+
+      "differ"  -- both sides carry at least one recognized region tag
+                   and share none of them (e.g. {"usa"} vs {"europe"}).
+                   Two different-looking titles each tied to a
+                   different region corroborates that they're regional
+                   names for the same game, so this promotes an
+                   otherwise-medium text match to high confidence.
+      "unknown" -- either side carries no recognized region tag, or the
+                   two sides share at least one region (e.g. one release
+                   is tagged "(Europe)" and the other "(USA, Europe)") --
+                   a shared region isn't necessarily a red flag on its
+                   own (a multi-region release naturally overlaps with a
+                   single-region one for the same game), so this is
+                   treated as no signal either way rather than a reason
+                   to exclude the pair.
+    """
+    if regions_a and regions_b and not (regions_a & regions_b):
+        return "differ"
+    return "unknown"
+
+
+def _format_region_set(regions):
+    return "/".join(r.title() for r in sorted(regions)) if regions else "unknown"
+
+
+def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None, region_priority=None):
     """Look for titles that are probably the same game under a different
     name -- a roman-numeral vs arabic-numeral sequel number, a region
     that drops/adds "The", or a franchise-prefix/subtitle another
     region's release of the same game omits -- none of which
     normalize_title() folds together, so plan_duplicate_scan() treats
     them as entirely separate titles and never compares them.
+
+    Each candidate pair's region tags (see extract_regions()) are used
+    as corroborating evidence, not just the title text: two
+    differently-spelled titles tied to two entirely different regions
+    (e.g. one "(USA)", the other "(Europe)") are more likely the same
+    game released under regionally different names, so that promotes an
+    otherwise-medium text-similarity match to high confidence. See
+    _region_relationship() for exactly when that applies -- a shared or
+    missing region tag isn't treated as a red flag, just as no extra
+    signal either way.
 
     This is a discovery report only: nothing is moved, and no filter file
     is consulted -- a "potential" match still needs human judgement (see
@@ -2690,7 +2749,8 @@ def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
     sorted highest-confidence, then largest cluster, first.
     """
     extensions = extensions if extensions is not None else ROM_EXTENSIONS_DEFAULT
-    index = collect_title_index(roms_dir, dup_dir, extensions)
+    region_priority = region_priority or DEFAULT_REGION_PRIORITY
+    index = collect_title_index(roms_dir, dup_dir, extensions, region_priority=region_priority)
     title_keys = list(index.keys())
 
     uf = _UnionFind(title_keys)
@@ -2716,8 +2776,15 @@ def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
             continue
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                record(group[i], group[j], "high",
-                       "same after ignoring \"the/a/an/of/and/to\" and roman numerals")
+                tk_a, tk_b = group[i], group[j]
+                relationship = _region_relationship(
+                    index[tk_a]["regions"], index[tk_b]["regions"])
+                reason = "same after ignoring \"the/a/an/of/and/to\" and roman numerals"
+                if relationship == "differ":
+                    reason += "; region tags differ ({0} vs {1})".format(
+                        _format_region_set(index[tk_a]["regions"]),
+                        _format_region_set(index[tk_b]["regions"]))
+                record(tk_a, tk_b, "high", reason)
 
     # Pass 2: block titles by any long, distinctive shared token, then
     # check each candidate pair for a prefix/suffix relationship or high
@@ -2745,20 +2812,32 @@ def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
                     continue
                 if _differ_only_in_numeric_tokens(tokens_a, tokens_b):
                     continue
+
+                relationship = _region_relationship(
+                    index[tk_a]["regions"], index[tk_b]["regions"])
+                region_suffix = ""
+                if relationship == "differ":
+                    region_suffix = "; region tags differ ({0} vs {1})".format(
+                        _format_region_set(index[tk_a]["regions"]),
+                        _format_region_set(index[tk_b]["regions"]))
+
                 shorter, longer = (
                     (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b)
                     else (tokens_b, tokens_a))
                 if _is_contiguous_sub_or_super(shorter, longer):
                     record(tk_a, tk_b, "high",
                            "one title is a prefix/suffix of the other "
-                           "(subtitle or franchise-prefix difference)")
+                           "(subtitle or franchise-prefix difference)" + region_suffix)
                     continue
 
                 ratio = difflib.SequenceMatcher(
                     None, " ".join(tokens_a), " ".join(tokens_b)).ratio()
                 if ratio >= FUZZY_TITLE_SIMILARITY_THRESHOLD:
-                    record(tk_a, tk_b, "medium",
-                           "text similarity {0:.0%}".format(ratio))
+                    # A confirmed region difference is corroborating evidence
+                    # strong enough to promote an otherwise-medium text match.
+                    confidence = "high" if relationship == "differ" else "medium"
+                    record(tk_a, tk_b, confidence,
+                           "text similarity {0:.0%}".format(ratio) + region_suffix)
 
     groups = defaultdict(list)
     for tk in title_keys:
@@ -2790,12 +2869,13 @@ def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
     return clusters
 
 
-def find_potential_duplicates(roms_dir, dup_dir, extensions=None):
+def find_potential_duplicates(roms_dir, dup_dir, extensions=None, region_priority=None):
     """Print the clusters from find_potential_duplicate_titles(). Report
     only -- see that function's docstring for why nothing gets moved.
     Returns the cluster list.
     """
-    clusters = find_potential_duplicate_titles(roms_dir, dup_dir, extensions=extensions)
+    clusters = find_potential_duplicate_titles(
+        roms_dir, dup_dir, extensions=extensions, region_priority=region_priority)
     if not clusters:
         print("No potential cross-region duplicate titles found under {0}.".format(roms_dir))
         return clusters
@@ -2966,14 +3046,19 @@ def main():
                               "that drops/adds \"The\", or a franchise-prefix/"
                               "subtitle another region's release omits -- none of "
                               "which the normal scan's exact title match catches "
-                              "on its own. Report only: nothing is moved and no "
-                              "filter file is consulted, since a fuzzy match still "
-                              "needs human judgement (e.g. \"Fatal Fury\" vs "
-                              "\"Fatal Fury 2\" are NOT the same game despite "
-                              "looking related). Review the printed clusters, "
-                              "then rename files so the normal scan's exact title "
-                              "match already agrees on the ones that really are "
-                              "the same game. Ignores --apply. Runs standalone.")
+                              "on its own. A candidate pair's region tags are used "
+                              "as corroborating evidence (respects --regions): two "
+                              "differently-spelled titles tied to two entirely "
+                              "DIFFERENT regions promotes an otherwise-medium "
+                              "text-similarity match to high confidence. Report "
+                              "only: nothing is moved and no filter file is consulted, "
+                              "since a fuzzy match still needs human judgement "
+                              "(e.g. \"Fatal Fury\" vs \"Fatal Fury 2\" are NOT "
+                              "the same game despite looking related). Review the "
+                              "printed clusters, then rename files so the normal "
+                              "scan's exact title match already agrees on the "
+                              "ones that really are the same game. Ignores "
+                              "--apply. Runs standalone.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -2982,6 +3067,11 @@ def main():
         sys.exit(1)
 
     dup_dir = os.path.abspath(args.dup_dir) if args.dup_dir else os.path.join(roms_dir, ".duplicates")
+
+    region_priority = (
+        [r.strip().lower() for r in args.regions.split(",")]
+        if args.regions else DEFAULT_REGION_PRIORITY
+    )
 
     standalone_flags = [name for enabled, name in (
         (args.flatten_alpha_dirs, "--flatten-alpha-dirs"),
@@ -3028,7 +3118,7 @@ def main():
         return
 
     if args.find_potential_duplicates:
-        find_potential_duplicates(roms_dir, dup_dir)
+        find_potential_duplicates(roms_dir, dup_dir, region_priority=region_priority)
         return
 
     prior_scan = read_scan_marker(roms_dir)
@@ -3042,11 +3132,6 @@ def main():
         elif args.verbose:
             print("This folder was last processed by rom_cleanup.py v{0} "
                   "on {1} (same version as now).\n".format(prior_version, prior_date))
-
-    region_priority = (
-        [r.strip().lower() for r in args.regions.split(",")]
-        if args.regions else DEFAULT_REGION_PRIORITY
-    )
 
     extensions = (
         {e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()

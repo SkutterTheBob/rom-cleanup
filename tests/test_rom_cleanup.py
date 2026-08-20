@@ -3635,6 +3635,69 @@ def test_find_potential_duplicate_titles_merges_related_pairs_into_one_cluster(t
     }
 
 
+def test_extract_regions_finds_recognized_region_tags():
+    assert rc.extract_regions(["USA"], rc.DEFAULT_REGION_PRIORITY) == {"usa"}
+    assert rc.extract_regions(["USA, Europe"], rc.DEFAULT_REGION_PRIORITY) == {"usa", "europe"}
+    assert rc.extract_regions(["Rev 1"], rc.DEFAULT_REGION_PRIORITY) == set()
+
+
+def test_region_relationship_differ_when_disjoint():
+    assert rc._region_relationship({"usa"}, {"europe"}) == "differ"
+
+
+def test_region_relationship_unknown_when_either_side_has_no_region():
+    assert rc._region_relationship(set(), {"europe"}) == "unknown"
+    assert rc._region_relationship({"usa"}, set()) == "unknown"
+    assert rc._region_relationship(set(), set()) == "unknown"
+
+
+def test_region_relationship_unknown_when_regions_overlap():
+    """A shared region is NOT treated as a red flag -- a multi-region
+    release (e.g. "USA, Europe") naturally overlaps with a single-region
+    one for the same game (see the real "Aliens" case below), so this
+    must stay neutral rather than excluding the pair.
+    """
+    assert rc._region_relationship({"europe"}, {"usa", "europe"}) == "unknown"
+    assert rc._region_relationship({"usa"}, {"usa"}) == "unknown"
+
+
+def test_find_potential_duplicate_titles_promotes_ratio_match_when_regions_differ(tmp_path):
+    touch(tmp_path / "Pocket Monsters Red (Japan).zip")
+    touch(tmp_path / "Pocket Monster Red (USA).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "high"
+    assert "region tags differ" in clusters[0]["reasons"][0]
+
+
+def test_find_potential_duplicate_titles_stays_medium_when_regions_do_not_differ(tmp_path):
+    touch(tmp_path / "Pocket Monsters Red (USA).zip")
+    touch(tmp_path / "Pocket Monster Red (USA).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "medium"
+    assert "region tags differ" not in clusters[0]["reasons"][0]
+
+
+def test_find_potential_duplicate_titles_overlapping_regions_not_excluded(tmp_path):
+    """Regression test for the real-world case that motivated the region
+    check: a single-region release and a multi-region release that
+    includes that same region must still match, not be excluded just
+    because their region sets overlap.
+    """
+    touch(tmp_path / "Aliens (Europe).zip")
+    touch(tmp_path / "Aliens - The Computer Game (USA, Europe).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "high"
+
+
 def test_find_potential_duplicates_prints_no_matches_message(tmp_path):
     touch(tmp_path / "Chrono Trigger (USA).zip")
 

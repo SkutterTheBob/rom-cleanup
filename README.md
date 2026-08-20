@@ -232,16 +232,23 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   the same game under a different name across regions: a roman-numeral
   vs arabic-numeral sequel number (`Final Fantasy VII` / `Final Fantasy
   7`), a region that drops/adds "The", or a franchise-prefix/subtitle
-  another region's release omits (`007 - Licence to Kill` / `Licence to
-  Kill`, `Aliens` / `Aliens - The Computer Game`) — none of which the
-  normal scan's exact title match catches, since those really are
-  different filenames. Report only: nothing is moved and no filter file
-  is consulted, since a fuzzy match still needs human judgement (`Fatal
-  Fury` and `Fatal Fury 2` look related but are not the same game).
-  Prints each candidate cluster with a confidence level and the files
-  involved — review it, then rename files so the normal scan's exact
-  title match already agrees on the ones that really are the same game.
-  Ignores `--apply`, runs standalone.
+  another region's release omits (`Aliens` / `Aliens - The Computer
+  Game`) — none of which the normal scan's exact title match catches,
+  since those really are different filenames. A candidate pair's region
+  tags are also used as corroborating evidence (respects `--regions`):
+  two differently-spelled titles tied to two entirely different regions
+  (e.g. one `(USA)`, the other `(Europe)`) promotes an otherwise-medium
+  text-similarity match to high confidence. Report only: nothing is
+  moved and no filter file is consulted, since a fuzzy match still needs
+  human judgement (`Fatal Fury` and `Fatal Fury 2` look related but are
+  not the same game — purely numeric differences like this, whether a
+  sequel number or a numeric franchise-prefix like `007 -`, are excluded
+  outright rather than flagged, since numbered sequels are common enough
+  in a real library that flagging every one would bury the real matches
+  in noise). Prints each candidate cluster with a confidence level and
+  the files involved — review it, then rename files so the normal scan's
+  exact title match already agrees on the ones that really are the same
+  game. Ignores `--apply`, runs standalone.
 - **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
   script itself, and stamps each scanned roms folder with the script
   version + date so you're warned if you're re-running an updated script
@@ -265,7 +272,7 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
 | `--make-m3u` | Group disc-tagged `.chd`/`.rvz` releases with 2+ discs behind a single `.m3u` playlist in `roms_dir`, moving the discs into a per-release subfolder under a hidden per-format folder (`.chd/` or `.rvz/`) |
 | `--isolate-imports` | Move every title with no `USA`/`World`-tagged release into `roms_dir/.imports/` (hidden from ES-DE/RetroArch), keeping every region/revision of that title together |
 | `--fix-filename-spacing` | Strip a trailing space right before the extension on every `.chd`/`.iso` under `roms_dir` (e.g. `Game .chd` → `Game.chd`), updating any `.cue`/`.m3u` reference to match |
-| `--find-potential-duplicates` | Report titles that are probably the same game under a different name across regions (roman numeral vs digit, dropped/added "The", subtitle or franchise-prefix differences) — nothing is moved, review manually |
+| `--find-potential-duplicates` | Report titles that are probably the same game under a different name across regions (roman numeral vs digit, dropped/added "The", subtitle or franchise-prefix differences, corroborated by differing region tags) — nothing is moved, review manually |
 | `--version` | Print the script version and exit |
 
 ## Installing chdman (for `--convert-to-chd`)

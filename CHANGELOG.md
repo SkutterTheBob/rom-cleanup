@@ -6,18 +6,27 @@
   the same game under a different name across regions -- a roman-numeral
   vs arabic-numeral sequel number (`Final Fantasy VII` / `Final Fantasy
   7`), a region that drops/adds "The", or a franchise-prefix/subtitle
-  another region's release omits (`007 - Licence to Kill` / `Licence to
-  Kill`, `Aliens` / `Aliens - The Computer Game`) -- none of which the
-  normal scan's exact title match catches on its own, since those are
-  genuinely different filenames.
+  another region's release omits (`Aliens` / `Aliens - The Computer
+  Game`) -- none of which the normal scan's exact title match catches on
+  its own, since those are genuinely different filenames.
+
+  A candidate pair's region tags are also used as corroborating evidence
+  (respects `--regions`): two differently-spelled titles tied to two
+  entirely different regions (e.g. one `(USA)`, the other `(Europe)`)
+  promotes an otherwise-medium text-similarity match to high confidence.
 
   Report only: nothing is moved and no filter file is consulted, since a
   fuzzy match still needs human judgement (`Fatal Fury` and `Fatal Fury
-  2` look related but are not the same game). Prints each candidate
-  cluster with a confidence level (high: same after ignoring filler
-  words/roman numerals, or one title is a prefix/suffix of the other;
-  medium: high text similarity) and the files involved, for manual
-  review. Ignores `--apply`, runs standalone.
+  2` look related but are not the same game -- purely numeric
+  differences like this, whether a sequel number or a numeric
+  franchise-prefix like `007 -`, are excluded outright rather than
+  flagged, since numbered sequels are common enough in a real library
+  that flagging every one would bury the real matches in noise). Prints
+  each candidate cluster with a confidence level (high: same after
+  ignoring filler words/roman numerals, one title is a prefix/suffix of
+  the other, or a region-corroborated text match; medium: text
+  similarity alone) and the files involved, for manual review. Ignores
+  `--apply`, runs standalone.
 
 ## 1.10.0
 
