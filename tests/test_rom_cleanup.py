@@ -3478,5 +3478,191 @@ def test_fix_filename_spacing_and_convert_to_chd_cannot_combine(tmp_path):
     assert "can't be combined" in result.stderr
 
 
+# ---------------------------------------------------------------------
+# --find-potential-duplicates
+# ---------------------------------------------------------------------
+
+def test_fuzzy_title_tokens_converts_roman_numerals():
+    assert rc.fuzzy_title_tokens("Final Fantasy VII") == ["final", "fantasy", "7"]
+
+
+def test_fuzzy_title_tokens_drops_stopwords():
+    assert rc.fuzzy_title_tokens("The Legend of Zelda") == ["legend", "zelda"]
+
+
+def test_fuzzy_title_tokens_keeps_ordinary_words_intact():
+    assert rc.fuzzy_title_tokens("Chrono Trigger") == ["chrono", "trigger"]
+
+
+def test_is_contiguous_sub_or_super_prefix():
+    assert rc._is_contiguous_sub_or_super(["aliens"], ["aliens", "computer", "game"])
+
+
+def test_is_contiguous_sub_or_super_suffix():
+    assert rc._is_contiguous_sub_or_super(["licence", "kill"], ["007", "licence", "kill"])
+
+
+def test_is_contiguous_sub_or_super_false_when_unrelated():
+    assert not rc._is_contiguous_sub_or_super(["dragon", "warrior"], ["dragon", "quest", "extra"])
+
+
+def test_is_contiguous_sub_or_super_false_when_equal_length():
+    assert not rc._is_contiguous_sub_or_super(["mega", "man"], ["mega", "man"])
+
+
+def test_differ_only_in_numeric_tokens_true_for_sequel_pair():
+    assert rc._differ_only_in_numeric_tokens(["fatal", "fury"], ["fatal", "fury", "2"])
+    assert rc._differ_only_in_numeric_tokens(["mega", "man", "2"], ["mega", "man", "3"])
+
+
+def test_differ_only_in_numeric_tokens_false_for_real_word_difference():
+    assert not rc._differ_only_in_numeric_tokens(["dragon", "warrior"], ["dragon", "quest"])
+    assert not rc._differ_only_in_numeric_tokens(["aliens"], ["aliens", "computer", "game"])
+
+
+def test_collect_title_index_groups_by_title_and_skips_bios_proto_program(tmp_path):
+    touch(tmp_path / "Super Game (USA).zip")
+    touch(tmp_path / "Super Game (Europe).zip")
+    touch(tmp_path / "Some BIOS (World) [BIOS].zip")
+    touch(tmp_path / "Unfinished Game (Proto).zip")
+    touch(tmp_path / "Sega Channel (Program) (USA).zip")
+
+    index = rc.collect_title_index(str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT)
+
+    assert set(index.keys()) == {"super game"}
+    assert len(index["super game"]["files"]) == 2
+
+
+def test_collect_title_index_ignores_duplicates_folder(tmp_path):
+    touch(tmp_path / "Kept Game (USA).zip")
+    touch(tmp_path / ".duplicates" / "Old Game (Europe).zip")
+
+    index = rc.collect_title_index(str(tmp_path), default_dup_dir(tmp_path), rc.ROM_EXTENSIONS_DEFAULT)
+
+    assert set(index.keys()) == {"kept game"}
+
+
+def test_find_potential_duplicate_titles_finds_roman_numeral_variant(tmp_path):
+    touch(tmp_path / "Final Fantasy VII (USA).chd")
+    touch(tmp_path / "Final Fantasy 7 (Japan).chd")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "high"
+    titles = {t[1] for t in clusters[0]["titles"]}
+    assert titles == {"Final Fantasy VII", "Final Fantasy 7"}
+
+
+def test_find_potential_duplicate_titles_finds_dropped_the(tmp_path):
+    touch(tmp_path / "The Legend of Zelda (USA).zip")
+    touch(tmp_path / "Legend of Zelda (Europe).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "high"
+
+
+def test_find_potential_duplicate_titles_finds_subtitle_prefix_addition(tmp_path):
+    touch(tmp_path / "Aliens (Europe).zip")
+    touch(tmp_path / "Aliens - The Computer Game (USA, Europe).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert clusters[0]["confidence"] == "high"
+    titles = {t[1] for t in clusters[0]["titles"]}
+    assert titles == {"Aliens", "Aliens - The Computer Game"}
+
+
+def test_find_potential_duplicate_titles_excludes_bare_sequel_numbers(tmp_path):
+    """A numbered sequel (different game entirely) must never be reported,
+    not even as a medium-confidence hint -- see
+    _differ_only_in_numeric_tokens()'s docstring for why.
+    """
+    touch(tmp_path / "Fatal Fury (USA).zip")
+    touch(tmp_path / "Fatal Fury 2 (USA).zip")
+    touch(tmp_path / "Mega Man 2 (USA).zip")
+    touch(tmp_path / "Mega Man 3 (USA).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert clusters == []
+
+
+def test_find_potential_duplicate_titles_excludes_unrelated_titles(tmp_path):
+    touch(tmp_path / "Dragon Warrior (USA).zip")
+    touch(tmp_path / "Dragon Quest (Japan).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert clusters == []
+
+
+def test_find_potential_duplicate_titles_excludes_already_exact_duplicates(tmp_path):
+    """Titles that already share the same title_key are the normal scan's
+    job, not this one -- a single title_key with multiple releases must
+    not turn into a 2-member "potential duplicate" cluster on its own.
+    """
+    touch(tmp_path / "Chrono Trigger (USA).zip")
+    touch(tmp_path / "Chrono Trigger (Europe).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert clusters == []
+
+
+def test_find_potential_duplicate_titles_merges_related_pairs_into_one_cluster(tmp_path):
+    """Three names for the same game, each related to at least one other
+    by a prefix/suffix step, should collapse into one 3-title cluster via
+    the shared union-find grouping -- not print as separate overlapping
+    pairs. Also confirms an unrelated title (Chrono Trigger) stays out.
+    """
+    touch(tmp_path / "Aliens (Europe).zip")
+    touch(tmp_path / "Aliens - The Computer Game (USA).zip")
+    touch(tmp_path / "Aliens - The Computer Game - Special Edition (Japan).zip")
+    touch(tmp_path / "Chrono Trigger (USA).zip")
+
+    clusters = rc.find_potential_duplicate_titles(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert len(clusters) == 1
+    assert len(clusters[0]["titles"]) == 3
+    titles = {t[1] for t in clusters[0]["titles"]}
+    assert titles == {
+        "Aliens", "Aliens - The Computer Game",
+        "Aliens - The Computer Game - Special Edition",
+    }
+
+
+def test_find_potential_duplicates_prints_no_matches_message(tmp_path):
+    touch(tmp_path / "Chrono Trigger (USA).zip")
+
+    result = run_script(tmp_path, "--find-potential-duplicates")
+
+    assert result.returncode == 0
+    assert "No potential cross-region duplicate titles found" in result.stdout
+
+
+def test_find_potential_duplicates_reports_cluster_and_never_moves_files(tmp_path):
+    touch(tmp_path / "The Legend of Zelda (USA).zip")
+    touch(tmp_path / "Legend of Zelda (Europe).zip")
+
+    result = run_script(tmp_path, "--find-potential-duplicates", "--apply")
+
+    assert result.returncode == 0
+    assert "HIGH" in result.stdout
+    assert "1 potential duplicate cluster(s) found" in result.stdout
+    assert (tmp_path / "The Legend of Zelda (USA).zip").exists()
+    assert (tmp_path / "Legend of Zelda (Europe).zip").exists()
+    assert not (tmp_path / ".duplicates").exists()
+
+
+def test_find_potential_duplicates_and_fix_filename_spacing_cannot_combine(tmp_path):
+    result = run_script(tmp_path, "--find-potential-duplicates", "--fix-filename-spacing")
+    assert result.returncode != 0
+    assert "can't be combined" in result.stderr
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

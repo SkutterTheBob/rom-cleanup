@@ -30,6 +30,7 @@ review the grouping before anything happens to your files.
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import re
@@ -39,7 +40,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -2530,6 +2531,293 @@ def log_run(roms_dir, mode, filter_file_used, summary, moved=None, errors=0):
         print("Warning: could not write log file: {0}".format(e), file=sys.stderr)
 
 
+# ---- finding potential cross-region duplicate titles ---------------------
+
+# A small, fixed vocabulary of roman numerals used in game titles/sequel
+# numbers (e.g. "Final Fantasy VII" vs "Final Fantasy 7") -- large enough
+# to cover realistic sequel numbering, never meant to be a general roman
+# numeral parser.
+ROMAN_TO_ARABIC = {
+    "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6",
+    "vii": "7", "viii": "8", "ix": "9", "x": "10", "xi": "11", "xii": "12",
+    "xiii": "13", "xiv": "14", "xv": "15", "xvi": "16", "xvii": "17",
+    "xviii": "18", "xix": "19", "xx": "20",
+}
+
+# Small, common words that regions/dump groups are inconsistent about
+# including (e.g. "The Legend of Zelda" vs "Legend of Zelda", "Licence to
+# Kill" vs "007 - Licence to Kill") -- dropped only for fuzzy comparison,
+# never for the real title_key normal duplicate-scan grouping relies on.
+FUZZY_TITLE_STOPWORDS = {"the", "a", "an", "and", "of", "to"}
+
+FUZZY_TITLE_SIMILARITY_THRESHOLD = 0.82
+
+# Only tokens at least this long are used as blocking keys when looking
+# for potential-match candidates -- long enough that two titles sharing
+# one aren't sharing it by coincidence (a short/common word like "man" or
+# "game" would otherwise create huge, mostly-useless comparison buckets).
+FUZZY_BLOCK_MIN_TOKEN_LEN = 4
+# Skip a blocking bucket this large -- almost certainly a generic word
+# rather than a real shared title fragment, and comparing everything in
+# it pairwise would be wasted (possibly slow) work.
+FUZZY_BLOCK_MAX_SIZE = 400
+
+
+def fuzzy_title_tokens(title):
+    """A looser tokenization than normalize_title(), used only for
+    FINDING potential cross-region duplicate titles -- never for the real
+    title_key normal duplicate-scan grouping relies on, since it's lossy
+    enough to occasionally over-merge two unrelated short titles (that's
+    why matches found this way are only ever reported, never auto-moved --
+    see find_potential_duplicate_titles()). Converts a roman-numeral
+    token to its arabic digit and drops a small set of filler words (see
+    FUZZY_TITLE_STOPWORDS).
+    """
+    tokens = normalize_title(title).split(" ")
+    out = []
+    for tok in tokens:
+        if not tok or tok in FUZZY_TITLE_STOPWORDS:
+            continue
+        out.append(ROMAN_TO_ARABIC.get(tok, tok))
+    return out
+
+
+def _is_contiguous_sub_or_super(shorter, longer):
+    """True if shorter's tokens appear as an exact prefix OR suffix of
+    longer's tokens -- e.g. "Licence to Kill" is a suffix of "007 -
+    Licence to Kill", and "Aliens" is a prefix of "Aliens - The Computer
+    Game" -- the common shape of a region dropping/adding a franchise
+    prefix or subtitle.
+    """
+    if not shorter or len(shorter) >= len(longer):
+        return False
+    return longer[:len(shorter)] == shorter or longer[-len(shorter):] == shorter
+
+
+def _differ_only_in_numeric_tokens(tokens_a, tokens_b):
+    """True if the two token lists become identical once every purely-
+    numeric token is dropped from each -- i.e. the only difference
+    between them is which sequel number (or whether one exists at all)
+    is present, e.g. "Mega Man 2" vs "Mega Man 3", or "Fatal Fury" vs
+    "Fatal Fury 2".
+
+    Deliberately excluded from every match tier in
+    find_potential_duplicate_titles(), not just downgraded to medium
+    confidence: those are genuinely different games, and numbered
+    sequels are common enough in any real ROM library that flagging
+    every such pair -- even as a low-confidence hint -- would bury the
+    real cross-region matches in noise. The cost is that a same-shape
+    but legitimate difference, like a numeric franchise-prefix drop
+    ("007 - Licence to Kill" -> "Licence to Kill"), gets excluded too --
+    a deliberate trade-off, since it looks identical to a sequel-number
+    difference from token position alone.
+    """
+    non_numeric_a = [t for t in tokens_a if not t.isdigit()]
+    non_numeric_b = [t for t in tokens_b if not t.isdigit()]
+    return non_numeric_a == non_numeric_b and tokens_a != tokens_b
+
+
+def collect_title_index(roms_dir, dup_dir, extensions):
+    """Walk roms_dir and build a simple index of every distinct title_key
+    found, independent of any filter file. Skips BIOS/proto-beta/
+    (Program)-tagged files, matching scan_rom_files()'s treatment --
+    they're not real "duplicate title" candidates.
+
+    Returns {title_key: {"display": str, "files": [path, ...]}}.
+    """
+    index = {}
+    for root, dirs, files in walk_excluding_dup_dir(roms_dir, dup_dir):
+        for fname in files:
+            stem, ext = os.path.splitext(fname)
+            if ext.lower() not in extensions:
+                continue
+            base_title, tags = extract_tags(stem)
+            if any(is_proto_beta_tag(t) for t in tags):
+                continue
+            if any(t.strip().lower() == "bios" for t in tags):
+                continue
+            if any(is_program_tag(t) for t in tags):
+                continue
+
+            title_key = normalize_title(base_title) or normalize_title(stem)
+            display = base_title.strip() or stem
+            entry = index.setdefault(title_key, {"display": display, "files": []})
+            entry["files"].append(os.path.join(root, fname))
+    return index
+
+
+class _UnionFind:
+    """Minimal union-find so several pairwise "these look related" edges
+    collapse into one cluster per connected group of titles, instead of
+    printing overlapping pairs (e.g. three regional names for the same
+    game should be one 3-title cluster, not three separate pairs).
+    """
+
+    def __init__(self, keys):
+        self.parent = {k: k for k in keys}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def find_potential_duplicate_titles(roms_dir, dup_dir, extensions=None):
+    """Look for titles that are probably the same game under a different
+    name -- a roman-numeral vs arabic-numeral sequel number, a region
+    that drops/adds "The", or a franchise-prefix/subtitle another
+    region's release of the same game omits -- none of which
+    normalize_title() folds together, so plan_duplicate_scan() treats
+    them as entirely separate titles and never compares them.
+
+    This is a discovery report only: nothing is moved, and no filter file
+    is consulted -- a "potential" match still needs human judgement (see
+    fuzzy_title_tokens()'s docstring for why an automatic merge would be
+    unsafe -- e.g. "Fatal Fury" vs "Fatal Fury 2" are NOT the same game
+    despite looking related). Review the printed clusters, then rename
+    files so normalize_title() already agrees on the ones that really
+    are the same game.
+
+    Returns a list of clusters, each
+    {"confidence": "high"|"medium", "reasons": [str, ...],
+     "titles": [(title_key, display_title, [file_path, ...]), ...]},
+    sorted highest-confidence, then largest cluster, first.
+    """
+    extensions = extensions if extensions is not None else ROM_EXTENSIONS_DEFAULT
+    index = collect_title_index(roms_dir, dup_dir, extensions)
+    title_keys = list(index.keys())
+
+    uf = _UnionFind(title_keys)
+    pair_reasons = {}  # (title_key_a, title_key_b) sorted -> (confidence, reason)
+    fuzzy_tokens = {tk: fuzzy_title_tokens(index[tk]["display"]) for tk in title_keys}
+
+    def record(tk_a, tk_b, confidence, reason):
+        uf.union(tk_a, tk_b)
+        pair_key = tuple(sorted((tk_a, tk_b)))
+        existing = pair_reasons.get(pair_key)
+        if existing is None or (existing[0] == "medium" and confidence == "high"):
+            pair_reasons[pair_key] = (confidence, reason)
+
+    # Pass 1: titles that collapse to the exact same fuzzy token sequence
+    # (roman numeral / filler-word differences only).
+    fuzzy_key_groups = defaultdict(list)
+    for tk in title_keys:
+        key = " ".join(fuzzy_tokens[tk])
+        if key:
+            fuzzy_key_groups[key].append(tk)
+    for group in fuzzy_key_groups.values():
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                record(group[i], group[j], "high",
+                       "same after ignoring \"the/a/an/of/and/to\" and roman numerals")
+
+    # Pass 2: block titles by any long, distinctive shared token, then
+    # check each candidate pair for a prefix/suffix relationship or high
+    # text similarity.
+    blocks = defaultdict(list)
+    for tk in title_keys:
+        for tok in set(fuzzy_tokens[tk]):
+            if len(tok) >= FUZZY_BLOCK_MIN_TOKEN_LEN and not tok.isdigit():
+                blocks[tok].append(tk)
+
+    checked_pairs = set()
+    for bucket in blocks.values():
+        if len(bucket) < 2 or len(bucket) > FUZZY_BLOCK_MAX_SIZE:
+            continue
+        for i in range(len(bucket)):
+            for j in range(i + 1, len(bucket)):
+                tk_a, tk_b = bucket[i], bucket[j]
+                pair_key = tuple(sorted((tk_a, tk_b)))
+                if pair_key in checked_pairs:
+                    continue
+                checked_pairs.add(pair_key)
+
+                tokens_a, tokens_b = fuzzy_tokens[tk_a], fuzzy_tokens[tk_b]
+                if tokens_a == tokens_b:
+                    continue
+                if _differ_only_in_numeric_tokens(tokens_a, tokens_b):
+                    continue
+                shorter, longer = (
+                    (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b)
+                    else (tokens_b, tokens_a))
+                if _is_contiguous_sub_or_super(shorter, longer):
+                    record(tk_a, tk_b, "high",
+                           "one title is a prefix/suffix of the other "
+                           "(subtitle or franchise-prefix difference)")
+                    continue
+
+                ratio = difflib.SequenceMatcher(
+                    None, " ".join(tokens_a), " ".join(tokens_b)).ratio()
+                if ratio >= FUZZY_TITLE_SIMILARITY_THRESHOLD:
+                    record(tk_a, tk_b, "medium",
+                           "text similarity {0:.0%}".format(ratio))
+
+    groups = defaultdict(list)
+    for tk in title_keys:
+        groups[uf.find(tk)].append(tk)
+
+    clusters = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        reasons = set()
+        confidence = "medium"
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                hit = pair_reasons.get(tuple(sorted((members[i], members[j]))))
+                if hit:
+                    reasons.add(hit[1])
+                    if hit[0] == "high":
+                        confidence = "high"
+        clusters.append({
+            "confidence": confidence,
+            "reasons": sorted(reasons),
+            "titles": sorted(
+                (tk, index[tk]["display"], sorted(index[tk]["files"]))
+                for tk in members),
+        })
+
+    confidence_rank = {"high": 0, "medium": 1}
+    clusters.sort(key=lambda c: (confidence_rank[c["confidence"]], -len(c["titles"])))
+    return clusters
+
+
+def find_potential_duplicates(roms_dir, dup_dir, extensions=None):
+    """Print the clusters from find_potential_duplicate_titles(). Report
+    only -- see that function's docstring for why nothing gets moved.
+    Returns the cluster list.
+    """
+    clusters = find_potential_duplicate_titles(roms_dir, dup_dir, extensions=extensions)
+    if not clusters:
+        print("No potential cross-region duplicate titles found under {0}.".format(roms_dir))
+        return clusters
+
+    for cluster in clusters:
+        print("\n[{0}] possible match ({1})".format(
+            cluster["confidence"].upper(), "; ".join(cluster["reasons"])))
+        for title_key, display, files in cluster["titles"]:
+            print("  {0!r}  ({1} file(s))".format(display, len(files)))
+            for fpath in files:
+                print("    {0}".format(os.path.relpath(fpath, roms_dir)))
+
+    high = sum(1 for c in clusters if c["confidence"] == "high")
+    medium = len(clusters) - high
+    print("\n{0} potential duplicate cluster(s) found ({1} high-confidence, "
+          "{2} medium-confidence). Nothing was moved -- review manually, "
+          "then rename files so they share a title (or add a "
+          "release-specific [blacklist] entry once you're sure) before "
+          "re-running the normal scan.".format(len(clusters), high, medium))
+    return clusters
+
+
 def main():
     parser = argparse.ArgumentParser(description="Find and move duplicate ROMs.")
     parser.add_argument("--version", action="version",
@@ -2671,6 +2959,21 @@ def main():
                               "left pointing at a file that no longer exists. "
                               "Respects --apply (dry-run preview by default). "
                               "Runs standalone.")
+    parser.add_argument("--find-potential-duplicates", action="store_true",
+                         help="Look for titles that are probably the same game "
+                              "under a different name across regions -- a roman-"
+                              "numeral vs arabic-numeral sequel number, a region "
+                              "that drops/adds \"The\", or a franchise-prefix/"
+                              "subtitle another region's release omits -- none of "
+                              "which the normal scan's exact title match catches "
+                              "on its own. Report only: nothing is moved and no "
+                              "filter file is consulted, since a fuzzy match still "
+                              "needs human judgement (e.g. \"Fatal Fury\" vs "
+                              "\"Fatal Fury 2\" are NOT the same game despite "
+                              "looking related). Review the printed clusters, "
+                              "then rename files so the normal scan's exact title "
+                              "match already agrees on the ones that really are "
+                              "the same game. Ignores --apply. Runs standalone.")
     args = parser.parse_args()
 
     roms_dir = os.path.abspath(args.roms_dir)
@@ -2687,6 +2990,7 @@ def main():
         (args.make_m3u, "--make-m3u"),
         (args.isolate_imports, "--isolate-imports"),
         (args.fix_filename_spacing, "--fix-filename-spacing"),
+        (args.find_potential_duplicates, "--find-potential-duplicates"),
     ) if enabled]
     if len(standalone_flags) > 1:
         print("Error: {0} can't be combined -- run them one at a time.".format(
@@ -2721,6 +3025,10 @@ def main():
 
     if args.fix_filename_spacing:
         fix_filename_spacing(roms_dir, dup_dir, args.apply)
+        return
+
+    if args.find_potential_duplicates:
+        find_potential_duplicates(roms_dir, dup_dir)
         return
 
     prior_scan = read_scan_marker(roms_dir)
