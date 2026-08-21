@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -114,8 +114,10 @@ def is_alpha_bucket_dirname(name):
 # If --filter-file isn't given, look for this filename inside roms_dir.
 DEFAULT_FILTER_FILENAME = "rom_filters.txt"
 
-# Hidden log file written next to this script itself (not the roms folder),
-# recording a timestamped line for every run of the script.
+# Hidden log file written in the user's home directory (not the roms
+# folder, and not next to the script itself -- the script may be
+# deployed somewhere not writable by a regular user, e.g.
+# /usr/local/bin), recording a timestamped line for every run.
 LOG_FILENAME = ".rom_cleanup.log"
 
 # Hidden marker written INSIDE each scanned roms_dir, recording which
@@ -2493,12 +2495,12 @@ def write_scan_marker(roms_dir):
 
 
 def log_run(roms_dir, mode, filter_file_used, summary, moved=None, errors=0):
-    """Append a timestamped entry to the hidden log file next to this
-    script. Never raises -- logging failures shouldn't break a scan.
+    """Append a timestamped entry to the hidden log file in the user's
+    home directory. Never raises -- logging failures shouldn't break a
+    scan.
     """
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        log_path = os.path.join(script_dir, LOG_FILENAME)
+        log_path = os.path.join(os.path.expanduser("~"), LOG_FILENAME)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         lines = []

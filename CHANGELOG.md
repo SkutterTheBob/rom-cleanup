@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.10.1
+
+- Moved `.rom_cleanup.log` from next to the script itself to the user's
+  home directory. The script is meant to be run from wherever it's
+  deployed (e.g. copied to `/usr/local/bin` so it's on `PATH`), and a
+  regular user typically can't write there without sudo -- every applied
+  run was silently failing to log with a "could not write log file"
+  warning once deployed that way. The home directory is always writable
+  and consistent regardless of where the script itself lives.
+
 ## 1.10.0
 
 - Added `--fix-filename-spacing`: finds every `.chd`/`.iso` file under

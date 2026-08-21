@@ -227,9 +227,11 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   correctly-named file already exists too (an actual duplicate, not just
   a naming artifact), the rename never overwrites it. Also runs
   standalone and respects `--apply`.
-- **Logs every applied run** to a hidden `.rom_cleanup.log` next to the
-  script itself, and stamps each scanned roms folder with the script
-  version + date so you're warned if you're re-running an updated script
+- **Logs every applied run** to a hidden `.rom_cleanup.log` in your home
+  directory (not next to the script itself, since it may be deployed
+  somewhere not writable by a regular user, e.g. `/usr/local/bin`), and
+  stamps each scanned roms folder with the script version + date so
+  you're warned if you're re-running an updated script
   against a folder processed by an older version.
 
 ## CLI flags

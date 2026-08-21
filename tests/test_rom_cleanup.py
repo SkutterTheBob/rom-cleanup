@@ -3263,6 +3263,24 @@ def test_apply_writes_scan_marker_with_version(tmp_path):
     assert "last_scanned" in data
 
 
+def test_log_run_writes_to_home_directory_not_script_directory(tmp_path, monkeypatch):
+    """The log must never end up next to the script itself -- the script
+    can be deployed somewhere a regular user can't write to (e.g.
+    /usr/local/bin), so it has to go somewhere always writable instead.
+    """
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path))
+
+    rc.log_run(
+        "/some/roms/dir", "apply", None,
+        {"games": 1, "releases": 1, "kept": 1, "dup": 0, "bios": 0,
+         "proto_beta": 0, "program": 0, "reject": 0, "redundant": 0,
+         "filtered": 0})
+
+    log_path = tmp_path / rc.LOG_FILENAME
+    assert log_path.exists()
+    assert "/some/roms/dir" in log_path.read_text(encoding="utf-8")
+
+
 def test_version_flag_prints_version():
     result = run_script(".", "--help")  # cheap sanity check the script runs
     assert result.returncode == 0
