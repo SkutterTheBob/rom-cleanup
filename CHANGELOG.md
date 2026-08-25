@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.10.2
+
+- Fixed: a multi-disc release numbered with roman numerals (e.g.
+  `Game (USA) (Disc I).chd`, `Game (USA) (Disc II).chd`) was being
+  flagged as two competing releases of the same title and one disc
+  routed to `.duplicates/` -- `is_part_tag()` and `--make-m3u`'s disc
+  grouping both only recognized plain-digit disc/track/CD tags
+  (`Disc 1`, `Disc 2`), not roman numerals. Both now recognize `I`
+  through `X` as well, so a roman-numeral-numbered release is treated
+  as one release (normal scan) and groups into an `.m3u` playlist
+  (`--make-m3u`) exactly like its digit-numbered equivalent.
+
 ## 1.10.1
 
 - Moved `.rom_cleanup.log` from next to the script itself to the user's

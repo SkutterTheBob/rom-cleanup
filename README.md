@@ -166,7 +166,9 @@ python3 rom_cleanup.py /path/to/roms/SNES --apply   # actually move files
   entry, not a second folder entry for the same game. Discs of different
   formats never group together, even if title and tags otherwise match.
   Discs are ordered numerically (`Disc 10` sorts after `Disc 2`, not
-  before it). A lone disc-tagged file with no siblings, or two files
+  before it), and a disc tag numbered with roman numerals (`Disc I`,
+  `Disc II`) is recognized the same as its digit equivalent. A lone
+  disc-tagged file with no siblings, or two files
   claiming the same disc number, are left untouched — the latter is
   flagged for manual review rather than guessed at. Skips releases
   already grouped with an up-to-date `.m3u` (re-checks its content, so

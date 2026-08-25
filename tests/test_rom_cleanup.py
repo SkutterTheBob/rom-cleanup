@@ -57,6 +57,19 @@ def test_is_part_tag_matches_track_disc_side():
     assert not rc.is_part_tag("Rev 1")
 
 
+def test_is_part_tag_matches_roman_numeral_disc_track_cd():
+    assert rc.is_part_tag("Disc I")
+    assert rc.is_part_tag("Disc II")
+    assert rc.is_part_tag("Disk III")
+    assert rc.is_part_tag("CD IV")
+    assert rc.is_part_tag("Track V")
+
+
+def test_is_part_tag_rejects_invalid_roman_numeral_and_side():
+    assert not rc.is_part_tag("Disc IIX")  # not a valid roman numeral
+    assert not rc.is_part_tag("Side I")  # sides use letters, not numerals
+
+
 def test_is_proto_beta_tag():
     assert rc.is_proto_beta_tag("Proto")
     assert rc.is_proto_beta_tag("Beta 1")
@@ -480,6 +493,17 @@ def test_parse_disc_number_none_for_non_disc_tags():
     assert rc.parse_disc_number("Rev 1") is None
 
 
+def test_parse_disc_number_matches_roman_numerals():
+    assert rc.parse_disc_number("Disc I") == 1
+    assert rc.parse_disc_number("Disc II") == 2
+    assert rc.parse_disc_number("Disk III") == 3
+    assert rc.parse_disc_number("CD IV") == 4
+
+
+def test_parse_disc_number_none_for_invalid_roman_numeral():
+    assert rc.parse_disc_number("Disc IIX") is None
+
+
 def test_plan_m3u_grouping_groups_multi_disc_release(tmp_path):
     touch(tmp_path / "Game (USA) (Disc 1).chd")
     touch(tmp_path / "Game (USA) (Disc 2).chd")
@@ -496,6 +520,25 @@ def test_plan_m3u_grouping_groups_multi_disc_release(tmp_path):
     assert [os.path.basename(d[1]) for d in discs] == [
         "Game (USA) (Disc 1).chd", "Game (USA) (Disc 2).chd"]
     assert all(needs_move for _, _, needs_move in discs)
+
+
+def test_plan_m3u_grouping_groups_roman_numeral_discs(tmp_path):
+    """Regression test: a release numbered "(Disc I)"/"(Disc II)" instead
+    of "(Disc 1)"/"(Disc 2)" must still be recognized as a multi-disc
+    release, not treated as two competing releases of the same title.
+    """
+    touch(tmp_path / "D (USA) (Disc I).chd")
+    touch(tmp_path / "D (USA) (Disc II).chd")
+
+    to_group, already_done, ambiguous = rc.plan_m3u_grouping(str(tmp_path), default_dup_dir(tmp_path))
+
+    assert already_done == []
+    assert ambiguous == []
+    assert len(to_group) == 1
+    _, m3u_path, discs = to_group[0]
+    assert m3u_path == str(tmp_path / "D (USA).m3u")
+    assert [os.path.basename(d[1]) for d in discs] == [
+        "D (USA) (Disc I).chd", "D (USA) (Disc II).chd"]
 
 
 def test_plan_m3u_grouping_groups_rvz_releases_under_their_own_hidden_folder(tmp_path):
@@ -1938,6 +1981,23 @@ def test_apply_does_not_overwrite_same_named_duplicates(tmp_path):
     survived = sorted(p.read_bytes() for p in (tmp_path / ".duplicates").iterdir()
                       if p.is_file())
     assert survived == [b"payload-A", b"payload-B"]
+
+
+def test_normal_scan_does_not_treat_roman_numeral_discs_as_duplicates(tmp_path):
+    """Regression test for the real-world report: a two-disc release
+    numbered "(Disc I)"/"(Disc II)" must be recognized as ONE release
+    (both discs kept), not two competing releases of the same title
+    where one loses the comparison and gets moved to .duplicates/.
+    """
+    touch(tmp_path / "D (USA) (Disc I).chd")
+    touch(tmp_path / "D (USA) (Disc II).chd")
+
+    result = run_script(tmp_path, "--apply")
+
+    assert "No duplicates found" in result.stdout
+    assert (tmp_path / "D (USA) (Disc I).chd").exists()
+    assert (tmp_path / "D (USA) (Disc II).chd").exists()
+    assert not (tmp_path / ".duplicates").exists()
 
 
 def test_apply_moves_program_tagged_sole_copy_out_of_roms_dir(tmp_path):
