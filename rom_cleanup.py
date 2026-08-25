@@ -39,7 +39,7 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 
-__version__ = "1.10.1"
+__version__ = "1.10.2"
 
 # ---- Tag parsing -----------------------------------------------------
 
@@ -52,12 +52,26 @@ DEFAULT_REGION_PRIORITY = [
     "netherlands", "spain", "sweden", "taiwan", "uk", "unknown",
 ]
 
-# Tags like "Track 01", "Disc 2", "CD1", "Side A" identify one PIECE of a
-# multi-file release (e.g. a .cue + many .bin tracks, or a multi-disc game).
-# These files are companions, not competing duplicates, so this tag is
-# ignored when deciding whether two files are "the same release".
+# Roman numerals as used in disc/track tags (e.g. "Disc I", "Disc II") --
+# some releases number multi-disc sets this way instead of with plain
+# digits. Multi-disc games essentially never run past a handful of
+# discs, so this deliberately doesn't try to support arbitrarily large
+# roman numerals.
+ROMAN_NUMERAL_TO_INT = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
+    "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+}
+
+# Tags like "Track 01", "Disc 2", "CD1", "Side A", "Disc II" identify one
+# PIECE of a multi-file release (e.g. a .cue + many .bin tracks, or a
+# multi-disc game). These files are companions, not competing
+# duplicates, so this tag is ignored when deciding whether two files are
+# "the same release".
 PART_TAG_RE = re.compile(
     r"^(track|disc|disk|cd|side|part)\s*[0-9]+$", re.IGNORECASE
+)
+PART_TAG_ROMAN_RE = re.compile(
+    r"^(track|disc|disk|cd|part)\s*([ivx]+)$", re.IGNORECASE
 )
 PART_TAG_RE_ALT = re.compile(r"^side\s*[a-d]$", re.IGNORECASE)
 
@@ -78,7 +92,10 @@ def is_program_tag(tag):
 
 def is_part_tag(tag):
     t = tag.strip()
-    return bool(PART_TAG_RE.match(t) or PART_TAG_RE_ALT.match(t))
+    if PART_TAG_RE.match(t) or PART_TAG_RE_ALT.match(t):
+        return True
+    m = PART_TAG_ROMAN_RE.match(t)
+    return bool(m) and m.group(2).lower() in ROMAN_NUMERAL_TO_INT
 
 ROM_EXTENSIONS_DEFAULT = {
     ".zip", ".7z", ".rar", ".nes", ".sfc", ".smc", ".gba", ".gb", ".gbc",
@@ -1255,18 +1272,27 @@ M3U_DISC_EXTENSIONS = {CHD_EXTENSION, RVZ_EXTENSION}
 M3U_HIDDEN_DIR_NAMES = M3U_DISC_EXTENSIONS
 
 # Tags that identify one DISC of a multi-disc release, e.g. "(Disc 1)",
-# "(Disc 2)", "(CD1)", "(Disk 3)" -- distinct from PART_TAG_RE, which also
-# matches "Track N" (a piece WITHIN one disc's own cue sheet, already
-# absorbed into that disc's single .chd, not a separate disc of its own).
+# "(Disc 2)", "(CD1)", "(Disk 3)", "(Disc II)" -- distinct from
+# PART_TAG_RE, which also matches "Track N" (a piece WITHIN one disc's
+# own cue sheet, already absorbed into that disc's single .chd, not a
+# separate disc of its own).
 DISC_TAG_RE = re.compile(r"^(?:disc|disk|cd)\s*([0-9]+)$", re.IGNORECASE)
+DISC_TAG_ROMAN_RE = re.compile(r"^(?:disc|disk|cd)\s*([ivx]+)$", re.IGNORECASE)
 
 
 def parse_disc_number(tag):
     """Return the disc number if this tag identifies one disc of a
-    multi-disc release (e.g. "Disc 2" -> 2), or None if it doesn't.
+    multi-disc release (e.g. "Disc 2" -> 2, "Disc II" -> 2), or None if
+    it doesn't.
     """
-    m = DISC_TAG_RE.match(tag.strip())
-    return int(m.group(1)) if m else None
+    t = tag.strip()
+    m = DISC_TAG_RE.match(t)
+    if m:
+        return int(m.group(1))
+    m = DISC_TAG_ROMAN_RE.match(t)
+    if m:
+        return ROMAN_NUMERAL_TO_INT.get(m.group(1).lower())
+    return None
 
 
 def find_disc_files(roms_dir, dup_dir, extensions):
